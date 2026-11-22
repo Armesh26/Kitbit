@@ -21,9 +21,9 @@
 #define OLED_ADDR          0x3C
 #define DISPLAY_ROTATION   0       // 0 = normal, 2 = display mounted upside down
 #define EYES_FPS           30
-// The OLED and the MPU6050 share the I2C bus. A faster bus while the frame is
-// pushed leaves more time for motion sampling. Drop to 400000 if the screen glitches.
-#define I2C_DISPLAY_HZ     800000
+// The OLED and the MPU6050 share the I2C bus. 400 kHz is the SSD1306's rated
+// maximum; going faster garbles the picture on many modules.
+#define I2C_DISPLAY_HZ     400000
 #define I2C_IDLE_HZ        400000
 
 // Eye geometry (smaller eyes = more room to look around)
