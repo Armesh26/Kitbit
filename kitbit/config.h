@@ -4,14 +4,15 @@
 // =====================================================================
 #pragma once
 
-// ---------------- Pins (ESP32, same wiring as Robo_Lamp_ai) ----------
-#define PIN_SDA            21
-#define PIN_SCL            22
-#define PIN_BUZZER         25      // passive buzzer (CuteBuzzerSounds)
+// ---------------- Pins (Seeed XIAO ESP32C3) ---------------------------
+#define PIN_SDA            D4      // GPIO6
+#define PIN_SCL            D5      // GPIO7
+#define PIN_BUZZER         D1      // GPIO3, passive buzzer (CuteBuzzerSounds)
 
 // Optional capacitive "head pat" pad (a wire / copper tape on a touch pin).
+// Not available on the ESP32-C3 (no touch hardware) - classic ESP32 / S2 / S3 only.
 #define ENABLE_TOUCH       0
-#define PIN_TOUCH          T0      // T0 = GPIO4 on classic ESP32
+#define PIN_TOUCH          T0
 #define TOUCH_RATIO        0.70f   // touched when reading drops below baseline*ratio (classic ESP32)
 
 // ---------------- Display ----------------------------------------------

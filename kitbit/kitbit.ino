@@ -1,7 +1,8 @@
 // =====================================================================
 //  KitBit - an always-on desk pet
 //
-//  Hardware : ESP32 + SSD1306 128x64 I2C OLED + MPU6050 + passive buzzer
+//  Hardware : Seeed XIAO ESP32C3 + SSD1306 128x64 I2C OLED + MPU6050 + passive buzzer
+//             (also runs on other ESP32s - change the pins in config.h)
 //  Libraries: Adafruit GFX, Adafruit SSD1306, Adafruit MPU6050,
 //             Adafruit Unified Sensor, FluxGarage RoboEyes, CuteBuzzerSounds
 //
@@ -37,6 +38,10 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include "config.h"
+
+#if ENABLE_TOUCH && !SOC_TOUCH_SENSOR_SUPPORTED
+#error "This chip has no capacitive touch (e.g. ESP32-C3) - set ENABLE_TOUCH 0 in config.h"
+#endif
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1, I2C_DISPLAY_HZ, I2C_IDLE_HZ);
 
@@ -104,7 +109,7 @@ static inline uint32_t minutes(float m) { return (uint32_t)(m * 60000.0f); }
 static inline float frand(float a, float b) { return a + (b - a) * (random(0, 10001) / 10000.0f); }
 static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// The OLED (eyes task, core 0) and the MPU6050 (main loop, core 1) share the
+// The OLED (eyes task) and the MPU6050 (main loop) share the
 // I2C bus, and the eyes' state is read while drawing. One recursive mutex guards both.
 SemaphoreHandle_t busMutex;
 struct BusLock {
@@ -1456,6 +1461,7 @@ void setup() {
 
   busMutex = xSemaphoreCreateRecursiveMutex();
   soundQueue = xQueueCreate(8, sizeof(int));
+  // Core 0 exists on every ESP32 (the C3 is single-core; dual-core chips run loop() on core 1).
   xTaskCreatePinnedToCore(eyesTask, "eyes", 4096, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(soundTask, "sound", 4096, NULL, 1, NULL, 0);
 

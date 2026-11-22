@@ -1,25 +1,24 @@
 # KitBit: an always-on desk pet
 
-KitBit is an ESP32 desk pet. It has animated robot eyes on an OLED, plays cute buzzer sounds, and uses an MPU6050 to feel what happens to it and around it on the desk.
+KitBit is a desk pet for the Seeed XIAO ESP32C3. It has animated robot eyes on an OLED, plays cute buzzer sounds, and uses an MPU6050 to feel what happens to it and around it on the desk.
 
 ## Hardware
 
-| Part | ESP32 pin |
+| Part | XIAO ESP32C3 pin |
 |---|---|
-| SSD1306 128x64 OLED (I2C, 0x3C) | SDA 21, SCL 22 |
-| MPU6050 (I2C, 0x68) | SDA 21, SCL 22 (same bus) |
-| Passive buzzer | GPIO 25 |
-| *(optional)* touch pad: a wire or copper tape on the pet's head | GPIO 4 (T0), set `ENABLE_TOUCH 1` |
+| SSD1306 128x64 OLED (I2C, 0x3C) | SDA D4, SCL D5 |
+| MPU6050 (I2C, 0x68) | SDA D4, SCL D5 (same bus) |
+| Passive buzzer | D1 |
 
-This is the same wiring as Robo_Lamp_ai, without the servos and relay.
+Other ESP32 boards work too: change the pins in [kitbit/config.h](kitbit/config.h). On a classic ESP32 / S2 / S3 you can also add a touch pad (a wire or copper tape on the pet's head) with `ENABLE_TOUCH 1`. The C3 has no touch hardware.
 
 ## Libraries
 
-Adafruit GFX, Adafruit SSD1306, Adafruit MPU6050, Adafruit Unified Sensor, [FluxGarage RoboEyes](https://github.com/FluxGarage/RoboEyes), CuteBuzzerSounds. The sketch was built against ESP32 core 3.3.7, board "ESP32 Dev Module".
+Adafruit GFX, Adafruit SSD1306, Adafruit MPU6050, Adafruit Unified Sensor, [FluxGarage RoboEyes](https://github.com/FluxGarage/RoboEyes), CuteBuzzerSounds. The sketch was built against ESP32 core 3.3.7, board "XIAO_ESP32C3" (keep "USB CDC On Boot" enabled, the default, so the serial monitor works over USB).
 
 ```sh
-arduino-cli compile --fqbn esp32:esp32:esp32 kitbit
-arduino-cli upload  --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 kitbit
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C3 kitbit
+arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32C3 -p /dev/ttyACM0 kitbit
 ```
 
 ## First-time setup
@@ -77,11 +76,13 @@ arduino-cli upload  --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 kitbit
 
 The structure follows Robo_Lamp_ai. Each part of the work runs in its own FreeRTOS task, so the eye animation never stutters:
 
-| Task | Core | What it does |
+| Task | Priority | What it does |
 |---|---|---|
-| eyes | 0 | ~30 fps; draws the RoboEyes frame plus overlays |
-| sound | 0 | Plays queued CuteBuzzerSounds and custom sounds |
+| eyes | 2 | ~30 fps; draws the RoboEyes frame plus overlays |
+| sound | 1 | Plays queued CuteBuzzerSounds and custom sounds |
 | loop | 1 | Reads the MPU at ~100 Hz, then runs the pet's behaviour logic at 50 Hz |
+
+The C3 is single-core, so all three share it; each task sleeps between frames or sounds, which leaves plenty of time.
 
 The OLED and MPU share the I2C bus behind one mutex. Every threshold and timing is in [kitbit/config.h](kitbit/config.h).
 
