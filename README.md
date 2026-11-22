@@ -6,7 +6,7 @@ KitBit is a desk pet for the Seeed XIAO ESP32C3. It has animated robot eyes on a
 
 | Part | XIAO ESP32C3 pin |
 |---|---|
-| SSD1306 128x64 OLED (I2C, 0x3C) | SDA D4, SCL D5 |
+| 1.3" SH1106 128x64 OLED (I2C, 0x3C); for a 0.96" SSD1306 set `OLED_SH1106 0` | SDA D4, SCL D5 |
 | MPU6050 (I2C, 0x68) | SDA D4, SCL D5 (same bus) |
 | Passive buzzer | D1 |
 
@@ -14,7 +14,7 @@ Other ESP32 boards work too: change the pins in [kitbit/config.h](kitbit/config.
 
 ## Libraries
 
-Adafruit GFX, Adafruit SSD1306, Adafruit MPU6050, Adafruit Unified Sensor, [FluxGarage RoboEyes](https://github.com/FluxGarage/RoboEyes), CuteBuzzerSounds. The sketch was built against ESP32 core 3.3.7, board "XIAO_ESP32C3" (keep "USB CDC On Boot" enabled, the default, so the serial monitor works over USB).
+Adafruit GFX, Adafruit SH110X (or Adafruit SSD1306 for 0.96" screens), Adafruit MPU6050, Adafruit Unified Sensor, [FluxGarage RoboEyes](https://github.com/FluxGarage/RoboEyes), CuteBuzzerSounds. The sketch was built against ESP32 core 3.3.7, board "XIAO_ESP32C3" (keep "USB CDC On Boot" enabled, the default, so the serial monitor works over USB).
 
 ```sh
 arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C3 kitbit

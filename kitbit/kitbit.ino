@@ -1,9 +1,10 @@
 // =====================================================================
 //  KitBit - an always-on desk pet
 //
-//  Hardware : Seeed XIAO ESP32C3 + SSD1306 128x64 I2C OLED + MPU6050 + passive buzzer
+//  Hardware : Seeed XIAO ESP32C3 + 1.3" SH1106 (or 0.96" SSD1306) 128x64 I2C OLED
+//             + MPU6050 + passive buzzer
 //             (also runs on other ESP32s - change the pins in config.h)
-//  Libraries: Adafruit GFX, Adafruit SSD1306, Adafruit MPU6050,
+//  Libraries: Adafruit GFX, Adafruit SH110X (or Adafruit SSD1306), Adafruit MPU6050,
 //             Adafruit Unified Sensor, FluxGarage RoboEyes, CuteBuzzerSounds
 //
 //  Eyes are drawn by FluxGarage RoboEyes (Dennis Hoelscher, www.fluxgarage.com),
@@ -29,7 +30,6 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_MPU6050.h>
 #include <CuteBuzzerSounds.h>
@@ -43,11 +43,33 @@
 #error "This chip has no capacitive touch (e.g. ESP32-C3) - set ENABLE_TOUCH 0 in config.h"
 #endif
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1, I2C_DISPLAY_HZ, I2C_IDLE_HZ);
+#if OLED_SH1106
+#include <Adafruit_SH110X.h>
+typedef Adafruit_SH1106G OledDisplay;
+#define OLED_WHITE        SH110X_WHITE
+#define OLED_BLACK        SH110X_BLACK
+#define OLED_ON_CMD       SH110X_DISPLAYON
+#define OLED_OFF_CMD      SH110X_DISPLAYOFF
+#define oledBegin()       display.begin(OLED_ADDR, true)
+#define oledCommand(c)    display.oled_command(c)
+#define oledDim(d)        display.setContrast((d) ? 0x01 : 0xFF)
+#else
+#include <Adafruit_SSD1306.h>
+typedef Adafruit_SSD1306 OledDisplay;
+#define OLED_WHITE        OLED_WHITE
+#define OLED_BLACK        OLED_BLACK
+#define OLED_ON_CMD       SSD1306_DISPLAYON
+#define OLED_OFF_CMD      SSD1306_DISPLAYOFF
+#define oledBegin()       display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)
+#define oledCommand(c)    display.ssd1306_command(c)
+#define oledDim(d)        display.dim(d)
+#endif
+
+OledDisplay display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1, I2C_DISPLAY_HZ, I2C_IDLE_HZ);
 
 // RoboEyes defines short macros (N, S, E, W, DEFAULT, ON, OFF, ...), so it is included last.
 #include <FluxGarage_RoboEyes.h>
-RoboEyes<Adafruit_SSD1306> eyes(display);
+RoboEyes<OledDisplay> eyes(display);
 
 Adafruit_MPU6050 mpu;
 Preferences prefs;
@@ -291,12 +313,12 @@ static const uint8_t CUP_BMP[]   PROGMEM = {0x24, 0x48, 0x00, 0xFC, 0xFA, 0xFA, 
 
 // Black "badge" behind an icon so it stays visible on top of the white eyes.
 static void icon(int x, int y, const uint8_t *bmp, int w, int h) {
-  display.fillRect(x - 1, y - 1, w + 2, h + 2, SSD1306_BLACK);
-  display.drawBitmap(x, y, bmp, w, h, SSD1306_WHITE);
+  display.fillRect(x - 1, y - 1, w + 2, h + 2, OLED_BLACK);
+  display.drawBitmap(x, y, bmp, w, h, OLED_WHITE);
 }
 static void glyph(int x, int y, char c, uint8_t size) {
   display.setTextSize(size);
-  display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+  display.setTextColor(OLED_WHITE, OLED_BLACK);
   display.setCursor(x, y);
   display.print(c);
 }
@@ -335,8 +357,8 @@ void drawOverlay() {
         float a = t * 0.009f + i * 2.094f;
         int x = 64 + (int)(30 * cosf(a));
         int y = 5 + (int)(4 * sinf(a));
-        display.fillCircle(x, y, 3, SSD1306_BLACK);
-        display.fillCircle(x, y, 2, SSD1306_WHITE);
+        display.fillCircle(x, y, 3, OLED_BLACK);
+        display.fillCircle(x, y, 2, OLED_WHITE);
       }
       break;
     case OV_NOTES:
@@ -349,7 +371,7 @@ void drawOverlay() {
       if ((t / 600) % 2 == 0) {
         icon(2, 2, CUP_BMP, 8, 8);
         display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setTextColor(OLED_WHITE, OLED_BLACK);
         display.setCursor(13, 2);
         display.print(F("break?"));
       }
@@ -368,8 +390,8 @@ void eyesTask(void *) {
     {
       BusLock lock;
       if (wantRotation != rotation) { rotation = wantRotation; display.setRotation(rotation); }
-      if (wantDisplayOn != on) { on = wantDisplayOn; display.ssd1306_command(on ? SSD1306_DISPLAYON : SSD1306_DISPLAYOFF); }
-      if (wantDim != dimmed) { dimmed = wantDim; display.dim(dimmed); }
+      if (wantDisplayOn != on) { on = wantDisplayOn; oledCommand(on ? OLED_ON_CMD : OLED_OFF_CMD); }
+      if (wantDim != dimmed) { dimmed = wantDim; oledDim(dimmed); }
       if (on) {
         eyes.drawEyes();   // autoDisplayEnabled is off: this only draws into the buffer
         drawOverlay();
@@ -1422,8 +1444,8 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(I2C_IDLE_HZ);
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println(F("SSD1306 init failed"));
+  if (!oledBegin()) {
+    Serial.println(F("OLED init failed - check wiring / OLED_ADDR / OLED_SH1106"));
     for (;;) delay(1000);
   }
   display.clearDisplay();

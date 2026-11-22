@@ -16,12 +16,15 @@
 #define TOUCH_RATIO        0.70f   // touched when reading drops below baseline*ratio (classic ESP32)
 
 // ---------------- Display ----------------------------------------------
+// 1.3" OLEDs almost always use the SH1106 chip, 0.96" ones the SSD1306.
+// Wrong choice = garbled screen / noisy strip at the edge.
+#define OLED_SH1106        1       // 1 = SH1106 (1.3"), 0 = SSD1306 (0.96")
 #define SCREEN_WIDTH       128
 #define SCREEN_HEIGHT      64
 #define OLED_ADDR          0x3C
 #define DISPLAY_ROTATION   0       // 0 = normal, 2 = display mounted upside down
 #define EYES_FPS           30
-// The OLED and the MPU6050 share the I2C bus. 400 kHz is the SSD1306's rated
+// The OLED and the MPU6050 share the I2C bus. 400 kHz is the OLED's rated
 // maximum; going faster garbles the picture on many modules.
 #define I2C_DISPLAY_HZ     400000
 #define I2C_IDLE_HZ        400000
