@@ -2,10 +2,11 @@
 //  KitBit - an always-on desk pet
 //
 //  Hardware : Seeed XIAO ESP32C3 + 1.3" SH1106 (or 0.96" SSD1306) 128x64 I2C OLED
-//             + MPU6050 + passive buzzer
+//             + MPU6050 (or a clone: MPU6500 / MPU9250 / unknown ID) + passive buzzer
 //             (also runs on other ESP32s - change the pins in config.h)
-//  Libraries: Adafruit GFX, Adafruit SH110X (or Adafruit SSD1306), Adafruit MPU6050,
-//             Adafruit Unified Sensor, FluxGarage RoboEyes, CuteBuzzerSounds
+//  Libraries: Adafruit GFX, Adafruit SH110X (or Adafruit SSD1306),
+//             FluxGarage RoboEyes, CuteBuzzerSounds
+//             (the motion sensor is driven directly, no MPU library needed)
 //
 //  Eyes are drawn by FluxGarage RoboEyes (Dennis Hoelscher, www.fluxgarage.com),
 //  task layout follows the Robo_Lamp_ai sketch (eyes / sound in their own
@@ -30,8 +31,6 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_MPU6050.h>
 #include <CuteBuzzerSounds.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -71,7 +70,6 @@ OledDisplay display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1, I2C_DISPLAY_HZ, I2C_
 #include <FluxGarage_RoboEyes.h>
 RoboEyes<OledDisplay> eyes(display);
 
-Adafruit_MPU6050 mpu;
 Preferences prefs;
 
 // ---------------------------------------------------------------------
@@ -516,18 +514,98 @@ static Orient classify(const Vec3 &g) {
   return OR_TILTED;
 }
 
+// ---- Minimal register-level driver -----------------------------------
+// Many "MPU6050" boards carry a clone or an MPU6500/MPU9250 that reports a
+// different WHO_AM_I, which makes most libraries refuse it. The registers used
+// here are identical on all of them, so any chip that answers is accepted.
+uint8_t imuAddr = 0x68;
+uint8_t imuWho = 0;
+
+static bool imuWrite(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(imuAddr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+static bool imuRead(uint8_t reg, uint8_t *buf, uint8_t n) {
+  Wire.beginTransmission(imuAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(imuAddr, n) != n) return false;
+  for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
+  return true;
+}
+
+static bool imuIs6500Family() {  // MPU6500 / 9250 / 9255 / ICM-20608 style temperature scaling
+  return imuWho == 0x70 || imuWho == 0x71 || imuWho == 0x73 || imuWho == 0x74 || imuWho == 0x75 || imuWho == 0xAF;
+}
+
+void i2cScan() {
+  Serial.print(F("I2C devices:"));
+  for (uint8_t a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+  }
+  Serial.println();
+}
+
+bool imuBegin() {
+  const uint8_t addrs[] = {0x68, 0x69};
+  bool found = false;
+  for (uint8_t a : addrs) {
+    imuAddr = a;
+    if (imuRead(0x75, &imuWho, 1)) { found = true; break; }  // WHO_AM_I
+  }
+  if (!found) return false;
+  Serial.printf("Motion sensor at 0x%02X, WHO_AM_I=0x%02X (%s)\n", imuAddr, imuWho,
+                imuWho == 0x68 ? "MPU6050" : imuIs6500Family() ? "MPU6500 family" : "unknown clone - trying anyway");
+
+  imuWrite(0x6B, 0x80);  // PWR_MGMT_1: reset
+  delay(100);
+  imuWrite(0x6B, 0x01);  // wake up, clock from gyro PLL
+  delay(50);
+  imuWrite(0x19, 0x09);  // SMPLRT_DIV: 1 kHz / (1+9) = 100 Hz
+  imuWrite(0x1A, 0x03);  // CONFIG: DLPF ~44 Hz
+  imuWrite(0x1B, 0x08);  // GYRO_CONFIG: +-500 dps
+  imuWrite(0x1C, 0x08);  // ACCEL_CONFIG: +-4 g
+  if (imuWho != 0x68) imuWrite(0x1D, 0x03);  // ACCEL_CONFIG2 (6500 family): accel DLPF ~44 Hz
+  delay(20);
+
+  // Sanity check: a living sensor sees ~1 g of gravity.
+  uint8_t b[6];
+  if (!imuRead(0x3B, b, 6)) return false;
+  float x = (int16_t)(b[0] << 8 | b[1]) / 8192.0f;
+  float y = (int16_t)(b[2] << 8 | b[3]) / 8192.0f;
+  float z = (int16_t)(b[4] << 8 | b[5]) / 8192.0f;
+  float g = sqrtf(x * x + y * y + z * z);
+  Serial.printf("Gravity check: %.2f g %s\n", g, (g > 0.6f && g < 1.4f) ? "(ok)" : "(odd - sensor may be dead or very fake)");
+  return g > 0.2f;
+}
+
+// accel in g, gyro in deg/s, temperature in C (sensor frame)
+static bool imuSample(float a[3], float g[3], float &tempOut) {
+  uint8_t b[14];
+  if (!imuRead(0x3B, b, 14)) return false;  // ACCEL_XOUT_H .. GYRO_ZOUT_L
+  for (int i = 0; i < 3; i++) {
+    a[i] = (int16_t)(b[i * 2] << 8 | b[i * 2 + 1]) / 8192.0f;      // +-4 g
+    g[i] = (int16_t)(b[8 + i * 2] << 8 | b[9 + i * 2]) / 65.5f;    // +-500 dps
+  }
+  int16_t rawT = (int16_t)(b[6] << 8 | b[7]);
+  tempOut = imuIs6500Family() ? rawT / 333.87f + 21.0f : rawT / 340.0f + 36.53f;
+  return true;
+}
+
 void imuStep() {
-  sensors_event_t a, g, t;
+  float sa[3], sg[3], sensorTemp;
   {
     BusLock lock;
-    if (!mpu.getEvent(&a, &g, &t)) return;
+    if (!imuSample(sa, sg, sensorTemp)) return;
   }
   uint32_t now = millis();
   float dt = clampf((now - lastImuMs) / 1000.0f, 0.001f, 0.1f);
   lastImuMs = now;
 
-  const float sa[3] = {a.acceleration.x / 9.80665f, a.acceleration.y / 9.80665f, a.acceleration.z / 9.80665f};
-  const float sg[3] = {g.gyro.x * 57.29578f, g.gyro.y * 57.29578f, g.gyro.z * 57.29578f};
   Vec3 prev = acc;
   acc = toBody(sa);
   gyr = toBody(sg);
@@ -536,7 +614,7 @@ void imuStep() {
   if (first) {
     first = false;
     prev = grav = restGrav = acc;
-    tempC = t.temperature + TEMP_OFFSET_C;
+    tempC = sensorTemp + TEMP_OFFSET_C;
   }
 
   // Gravity = low-passed acceleration; whatever is left is the pet being moved.
@@ -548,7 +626,7 @@ void imuStep() {
   accMag = acc.len();
   jerk = (acc - prev).len();
   gyroMag = gyr.len();
-  tempC += (t.temperature + TEMP_OFFSET_C - tempC) * 0.002f;
+  tempC += (sensorTemp + TEMP_OFFSET_C - tempC) * 0.002f;
 
   // --- being held / carried ---
   bool moving = gyroMag > HANDLE_GYRO_DPS || dynMag > 0.12f;
@@ -1452,15 +1530,10 @@ void setup() {
   display.display();
   display.setRotation(DISPLAY_ROTATION);
 
-  imuOk = mpu.begin(0x68, &Wire);
-  if (imuOk) {
-    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
-    Serial.println(F("MPU6050 ready"));
-  } else {
-    Serial.println(F("MPU6050 not found - running without motion sensing"));
-  }
+  delay(1500);  // give USB serial a moment so the boot log is visible
+  i2cScan();
+  imuOk = imuBegin();
+  if (!imuOk) Serial.println(F("Motion sensor not found at 0x68/0x69 - running without motion sensing"));
 
   cute.init(PIN_BUZZER);
   loadMemory();
