@@ -25,17 +25,27 @@ The motion sensor is driven directly (no MPU library), so clone "MPU6050" boards
 
 ## First-time setup
 
-1. Open the serial monitor at 115200 baud and type `imu`.
-2. With the pet standing upright, check that `up` reads about `+1.00`. If it doesn't, change the `IMU_*_AXIS` / `IMU_*_SIGN` values in [kitbit/config.h](kitbit/config.h) to match how the MPU is mounted.
-3. Tilt the pet to its right. `right` should go negative.
-4. Type on your keyboard and watch `desk=1`. If it never turns on, lower `DESK_MARGIN_G`. If it's always on, raise it.
+### Calibrate the sensor mounting (once)
+
+The pet needs to know which way the sensor is mounted inside it. Start calibration by typing `calibrate` in the serial monitor (115200 baud), or by **tapping the pet 6 times quickly**. The screen walks you through it:
+
+1. **"stand me upright"**: put it in its normal pose on the desk and let go. After about 1.5 s of stillness it beeps.
+2. **"lay me on my back"**: lay it down with the screen facing the ceiling and let go. After about 1.5 s it says "Calibrated!".
+
+This measures the exact mounting, at any angle, plus the gyro's zero-offset, and saves both to flash so it survives power cycles. `calreset` clears it and falls back to the `IMU_*` mapping in [kitbit/config.h](kitbit/config.h).
+
+To check it worked, type `imu`. Upright should show `up` at about `+1.00`, and tilting the pet to its right should make `right` go negative.
+
+### Tune desk-activity detection
+
+Type `imu` and watch `desk=` while you type on your keyboard. If it never shows `1`, lower `DESK_MARGIN_G`. If it's always `1`, raise it.
 
 ## What it does
 
 ### Handling it
 | You do | KitBit does |
 |---|---|
-| Tilt it | Eyes roll towards the lower side. Your desk's normal angle is learned over about 20 s, so a crooked desk doesn't push the eyes off-centre. |
+| Tilt it | Eyes roll towards the lower side. This overrides all other eye movement, including while you hold it. |
 | Tap it once | Boop: it blinks, looks towards your finger and chirps |
 | Double tap | Pet: happy eyes, floating hearts, cuddly sound or purr |
 | Triple tap | It sings a little tune with music notes (if it isn't too tired) |
@@ -58,12 +68,11 @@ The motion sensor is driven directly (no MPU library), so clone "MPU6050" boards
 - **Sleep behaviour.** If you tap it right after it fell asleep, one eye opens, it grumbles and goes back to sleep. Now and then it peeks with one eye while dreaming.
 - **Needs.** *Happiness* goes up with attention and down when it's ignored or mistreated. *Energy* drains while it's awake and recharges while it sleeps. Together they set its resting face: neutral, happy, or tired/sad.
 - **Random quirks.** It winks, looks around, whistles, yawns, sighs when bored, asks for attention with a "?", giggles to itself, gets hiccups (any tap cures them) and sneezes.
-- **Temperature.** It sweats when warm and shivers when cold, using the MPU6050's internal temperature sensor (adjust `TEMP_OFFSET_C`).
 - **Memory.** Happiness, energy and age are saved to flash. Every 24 h of total uptime it has a birthday and sings.
 
 ## Serial commands (115200 baud)
 
-`help status imu mute unmute chatty <0-3> sleep wake pet boop sing scare annoy dizzy hiccup sneeze greet break birthday happy sad angry sound <id> reset`
+`help status imu calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing scare annoy dizzy hiccup sneeze greet break birthday happy sad angry sound <id> reset`
 
 `chatty` sets how talkative it is:
 

@@ -42,6 +42,8 @@
 // Pick which sensor axis (0 = X, 1 = Y, 2 = Z) and sign maps to each body axis.
 // Default: MPU board lying flat in the base, chip facing up, sensor +X to the right,
 // sensor +Y pointing to the back of the pet.
+// These are only the fallback: run the calibration (serial "calibrate" or 6 quick
+// taps) and the exact mounting - any angle - is measured and saved to flash.
 // Check with the serial command "imu": standing upright should show  up ~ +1.00
 #define IMU_RIGHT_AXIS     0
 #define IMU_RIGHT_SIGN     (+1)
@@ -62,7 +64,8 @@
 #define FREEFALL_G         0.35f
 #define LAND_G             2.0f
 #define ORIENT_SETTLE_MS   600     // how long a new orientation must hold
-#define TILT_GAIN          3.0f    // how strongly the eyes roll towards the low side
+#define TILT_GAIN          3.0f    // how strongly the eyes roll towards the low side (full at ~20 deg)
+#define TILT_DEADZONE_DEG  4.0f    // smaller tilts are ignored
 
 // Desk-activity ("you are typing next to me") detection. The pet learns the
 // quiet noise floor itself; vibration above floor*RATIO + MARGIN means activity.
@@ -85,13 +88,6 @@
 #define BREAK_REMINDER_MIN 50      // 0 disables
 #define BREAK_NAG_EVERY_MIN 5
 #define BREAK_RESET_MIN    5       // this long without desk activity = you took a break
-
-// ---------------- Temperature feelings (MPU6050 die temperature) -------
-// The MPU's internal sensor reads a few degrees warm; correct with the offset.
-#define TEMP_FEELINGS      1
-#define TEMP_OFFSET_C      (-3.0f)
-#define TEMP_HOT_C         30.0f   // sweats above this
-#define TEMP_COLD_C        15.0f   // shivers below this
 
 // ---------------- Memory -------------------------------------------------
 #define REMEMBER_MOOD      1       // keep happiness/energy/age in flash across power cycles

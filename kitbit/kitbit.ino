@@ -14,6 +14,7 @@
 //
 //  What it does (see README.md for the full list):
 //   - eyes roll towards whichever side you tilt it
+//   - "calibrate" (serial) or 6 quick taps: learns how the sensor is mounted, saved to flash
 //   - tap = boop, double tap = pet (hearts), triple tap = it sings
 //   - shake / spin it -> dizzy, shake too long -> grumpy
 //   - drop it -> screams, then "oof"
@@ -23,7 +24,6 @@
 //     breaks, falls asleep when you leave, greets you when you come back
 //   - needs: happiness and energy drift over time and change its baseline mood
 //   - random quirks: winks, whistles, yawns, sighs, hiccups, sneezes, giggles
-//   - sweats when warm, shivers when cold (MPU6050 die temperature)
 //   - remembers its mood and age across power cycles, celebrates every 24h of uptime
 // =====================================================================
 
@@ -84,7 +84,7 @@ enum CustomSound : int {
 
 struct Note { float hz; int ms; };
 
-enum Overlay : uint8_t { OV_NONE, OV_ZZZ, OV_HEARTS, OV_ALERT, OV_QUESTION, OV_DIZZY, OV_NOTES, OV_BREAK };
+enum Overlay : uint8_t { OV_NONE, OV_ZZZ, OV_HEARTS, OV_ALERT, OV_QUESTION, OV_DIZZY, OV_NOTES, OV_BREAK, OV_TEXT };
 
 struct Face {
   uint8_t mood = DEFAULT;
@@ -288,7 +288,9 @@ void soundTask(void *) {
 // =====================================================================
 //  DISPLAY: eyes + little overlays (Zzz, hearts, !, ?, dizzy stars, notes, break)
 // =====================================================================
-const char *OVERLAY_NAMES[] = {"none", "zzz", "hearts", "alert", "question", "dizzy", "notes", "break"};
+const char *OVERLAY_NAMES[] = {"none", "zzz", "hearts", "alert", "question", "dizzy", "notes", "break", "text"};
+volatile const char *overlayLine1 = "";  // for OV_TEXT (calibration prompts)
+volatile const char *overlayLine2 = "";
 
 volatile Overlay overlay = OV_NONE;
 volatile uint32_t overlayStart = 0;
@@ -364,6 +366,15 @@ void drawOverlay() {
         int y = 4 + (int)(4 * sinf(t * 0.012f + i * 3.1f));
         icon(i == 0 ? 3 : 117, y, NOTE_BMP, 8, 8);
       }
+      break;
+    case OV_TEXT:
+      display.fillRect(0, 43, SCREEN_WIDTH, 21, OLED_BLACK);
+      display.setTextSize(1);
+      display.setTextColor(OLED_WHITE, OLED_BLACK);
+      display.setCursor(1, 45);
+      display.print((const char *)overlayLine1);
+      display.setCursor(1, 55);
+      display.print((const char *)overlayLine2);
       break;
     case OV_BREAK:
       if ((t / 600) % 2 == 0) {
@@ -476,11 +487,17 @@ const char *ORIENT_NAMES[] = {"upright", "tilted", "upside-down", "lying-left", 
 
 bool imuOk = false;
 Vec3 acc, grav, gyr, dyn;
-Vec3 restGrav;  // slowly learned "how I normally sit", so a crooked desk doesn't offset the eyes
 float accMag = 1, jerk = 0, gyroMag = 0;
 float vib = 0, vibFloor = 0.01f;
-float tempC = NAN;
 uint32_t lastImuMs = 0;
+bool imuRestart = true;          // re-seed the filters (boot, after calibration)
+
+// Mounting: rows are the pet's right / up / out-of-screen axes expressed in the
+// sensor's frame. Comes from "calibrate" (saved in flash) or the config.h mapping.
+float imuRot[3][3];
+float gyroBias[3] = {0, 0, 0};   // deg/s, sensor frame (clones often have a big one)
+bool imuCalibrated = false;
+float rawAcc[3], rawGyro[3];     // last sample in the sensor frame (gyro without bias correction)
 
 bool handling = false;  float handleScore = 0;
 bool shaking = false;   float shakeMeter = 0;  uint32_t shakeStartMs = 0;
@@ -495,10 +512,49 @@ MotionEvents ev;
 
 static Vec3 toBody(const float s[3]) {
   Vec3 v;
-  v.x = IMU_RIGHT_SIGN * s[IMU_RIGHT_AXIS];
-  v.y = IMU_UP_SIGN * s[IMU_UP_AXIS];
-  v.z = IMU_OUT_SIGN * s[IMU_OUT_AXIS];
+  v.x = imuRot[0][0] * s[0] + imuRot[0][1] * s[1] + imuRot[0][2] * s[2];
+  v.y = imuRot[1][0] * s[0] + imuRot[1][1] * s[1] + imuRot[1][2] * s[2];
+  v.z = imuRot[2][0] * s[0] + imuRot[2][1] * s[1] + imuRot[2][2] * s[2];
   return v;
+}
+
+void imuDefaultMounting() {
+  memset(imuRot, 0, sizeof(imuRot));
+  imuRot[0][IMU_RIGHT_AXIS] = IMU_RIGHT_SIGN;
+  imuRot[1][IMU_UP_AXIS] = IMU_UP_SIGN;
+  imuRot[2][IMU_OUT_AXIS] = IMU_OUT_SIGN;
+}
+
+void loadMounting() {
+  imuDefaultMounting();
+  prefs.begin("kitbit-imu", true);
+  if (prefs.getBool("ok", false) &&
+      prefs.getBytes("rot", imuRot, sizeof(imuRot)) == sizeof(imuRot)) {
+    prefs.getBytes("gb", gyroBias, sizeof(gyroBias));
+    imuCalibrated = true;
+  } else {
+    imuDefaultMounting();
+  }
+  prefs.end();
+  Serial.println(imuCalibrated ? F("IMU mounting: calibrated (from flash)")
+                               : F("IMU mounting: config.h defaults - type 'calibrate' or tap 6 times quickly"));
+}
+
+void saveMounting() {
+  prefs.begin("kitbit-imu", false);
+  prefs.putBytes("rot", imuRot, sizeof(imuRot));
+  prefs.putBytes("gb", gyroBias, sizeof(gyroBias));
+  prefs.putBool("ok", true);
+  prefs.end();
+}
+
+void clearMounting() {
+  prefs.begin("kitbit-imu", false);
+  prefs.clear();
+  prefs.end();
+  imuCalibrated = false;
+  imuDefaultMounting();
+  imuRestart = true;
 }
 
 static Orient classify(const Vec3 &g) {
@@ -537,7 +593,7 @@ static bool imuRead(uint8_t reg, uint8_t *buf, uint8_t n) {
   return true;
 }
 
-static bool imuIs6500Family() {  // MPU6500 / 9250 / 9255 / ICM-20608 style temperature scaling
+static bool imuIs6500Family() {  // MPU6500 / 9250 / 9255 / ICM-20608 style
   return imuWho == 0x70 || imuWho == 0x71 || imuWho == 0x73 || imuWho == 0x74 || imuWho == 0x75 || imuWho == 0xAF;
 }
 
@@ -583,38 +639,61 @@ bool imuBegin() {
   return g > 0.2f;
 }
 
-// accel in g, gyro in deg/s, temperature in C (sensor frame)
-static bool imuSample(float a[3], float g[3], float &tempOut) {
+// accel in g, gyro in deg/s (sensor frame)
+static bool imuSample(float a[3], float g[3]) {
   uint8_t b[14];
   if (!imuRead(0x3B, b, 14)) return false;  // ACCEL_XOUT_H .. GYRO_ZOUT_L
   for (int i = 0; i < 3; i++) {
     a[i] = (int16_t)(b[i * 2] << 8 | b[i * 2 + 1]) / 8192.0f;      // +-4 g
     g[i] = (int16_t)(b[8 + i * 2] << 8 | b[9 + i * 2]) / 65.5f;    // +-500 dps
   }
-  int16_t rawT = (int16_t)(b[6] << 8 | b[7]);
-  tempOut = imuIs6500Family() ? rawT / 333.87f + 21.0f : rawT / 340.0f + 36.53f;
   return true;
 }
 
+// At boot: if the pet is sitting still, measure the gyro zero-offset (~1 s).
+void imuMeasureGyroBias() {
+  float sum[3] = {0, 0, 0}, aMin = 10, aMax = 0;
+  int n = 0;
+  for (int i = 0; i < 100; i++) {
+    float a[3], g[3];
+    if (imuSample(a, g)) {
+      float m = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+      aMin = min(aMin, m);
+      aMax = max(aMax, m);
+      for (int k = 0; k < 3; k++) sum[k] += g[k];
+      n++;
+    }
+    delay(10);
+  }
+  if (n > 50 && aMax - aMin < 0.05f) {
+    for (int k = 0; k < 3; k++) gyroBias[k] = sum[k] / n;
+    Serial.printf("Gyro offset measured: %.1f %.1f %.1f dps\n", gyroBias[0], gyroBias[1], gyroBias[2]);
+  } else {
+    Serial.println(F("Moved during boot - using saved gyro offset"));
+  }
+}
+
 void imuStep() {
-  float sa[3], sg[3], sensorTemp;
+  float sa[3], sg[3];
   {
     BusLock lock;
-    if (!imuSample(sa, sg, sensorTemp)) return;
+    if (!imuSample(sa, sg)) return;
   }
   uint32_t now = millis();
   float dt = clampf((now - lastImuMs) / 1000.0f, 0.001f, 0.1f);
   lastImuMs = now;
 
+  memcpy(rawAcc, sa, sizeof(rawAcc));
+  memcpy(rawGyro, sg, sizeof(rawGyro));
+  for (int i = 0; i < 3; i++) sg[i] -= gyroBias[i];
+
   Vec3 prev = acc;
   acc = toBody(sa);
   gyr = toBody(sg);
 
-  static bool first = true;
-  if (first) {
-    first = false;
-    prev = grav = restGrav = acc;
-    tempC = sensorTemp + TEMP_OFFSET_C;
+  if (imuRestart) {
+    imuRestart = false;
+    prev = grav = acc;
   }
 
   // Gravity = low-passed acceleration; whatever is left is the pet being moved.
@@ -626,7 +705,11 @@ void imuStep() {
   accMag = acc.len();
   jerk = (acc - prev).len();
   gyroMag = gyr.len();
-  tempC += (sensorTemp + TEMP_OFFSET_C - tempC) * 0.002f;
+
+  // Gyro zero-offset drifts with temperature: keep trimming it while sitting still.
+  if (jerk < 0.02f && dynMag < 0.03f && fabsf(accMag - 1.0f) < 0.08f && gyroMag < 8.0f) {
+    for (int i = 0; i < 3; i++) gyroBias[i] += (sg[i]) * 0.002f;
+  }
 
   // --- being held / carried ---
   bool moving = gyroMag > HANDLE_GYRO_DPS || dynMag > 0.12f;
@@ -685,13 +768,6 @@ void imuStep() {
     else if (vib < vibFloor * 1.5f) vibFloor += (vib - vibFloor) * 0.001f;
     else vibFloor += (vib - vibFloor) * 0.000002f;  // very slow creep if the room got noisier
     if (vib > vibFloor * DESK_RATIO + DESK_MARGIN_G) deskActiveUntil = now + 4000;
-  }
-
-  // --- resting pose: adapts over ~20 s while sitting still and upright ---
-  if (!handling && grav.y > 0.55f * grav.len()) {
-    restGrav.x += (grav.x - restGrav.x) * 0.0005f;
-    restGrav.y += (grav.y - restGrav.y) * 0.0005f;
-    restGrav.z += (grav.z - restGrav.z) * 0.0005f;
   }
 
   // --- orientation (only when resting) ---
@@ -905,6 +981,7 @@ void celebrateBirthday() {
 
 void onTaps(uint8_t n, float side) {
   if (activity == ACT_HIDING) return;
+  if (n >= 6) { interact(); startCalibration(); return; }  // 6 quick taps = calibrate mounting
 
   if (since(recentTapsSince) > 10000) { recentTapsSince = millis(); recentTaps = 0; }
   recentTaps += n;
@@ -1224,12 +1301,6 @@ void baselineFace() {
       if (breakDue) f.sweat = true;
       break;
   }
-#if TEMP_FEELINGS
-  if (f.open && imuOk && !isnan(tempC)) {
-    if (tempC > TEMP_HOT_C) f.sweat = true;
-    else if (tempC < TEMP_COLD_C) f.hFlicker = 1;  // shivering
-  }
-#endif
   showFace(f);
 }
 
@@ -1380,22 +1451,25 @@ void quirkStep() {
 }
 
 void gazeStep() {
-  if (!reached(gazeHoldUntil) || hopRestoreAt) return;
+  if (hopRestoreAt) return;
   uint32_t now = millis();
 
   if (activity == ACT_ASLEEP || activity == ACT_HIDING) return;  // eyes parked by setActivity()
-  if (handling) { setIdleGaze(true, 1, 1); return; }               // looking around while carried
 
+  // Tilt wins over everything else: the eyes roll towards the low side.
   float m = grav.len();
   if (imuOk && m > 0.5f) {
     float gx = grav.x / m, gy = grav.y / m, gz = grav.z / m;
-    float rm = max(restGrav.len(), 0.1f);
-    if (gy > 0.55f) {  // more or less upright: eyes roll towards the low side
-      float tx = -(gx - restGrav.x / rm) * TILT_GAIN;
-      float ty = -(gz - restGrav.z / rm) * TILT_GAIN;
-      if (fabsf(tx) > 0.25f || fabsf(ty) > 0.25f) { lookAt(tx, ty); return; }
+    static const float deadzone = sinf(TILT_DEADZONE_DEG * DEG_TO_RAD);
+    if (gy > 0.5f && sqrtf(gx * gx + gz * gz) > deadzone) {
+      lookAt(-gx * TILT_GAIN, -gz * TILT_GAIN);
+      gazeHoldUntil = 0;
+      return;
     }
   }
+
+  if (!reached(gazeHoldUntil)) return;
+  if (handling) { setIdleGaze(true, 1, 2); return; }  // looking around while carried
   if (orient == OR_FACE_UP) {  // stargazing
     lookAt(sinf(now * 0.0004f) * 0.8f, -1);
     return;
@@ -1448,18 +1522,125 @@ void touchStep() {
 #endif
 
 // =====================================================================
+//  IMU CALIBRATION
+//  Step 1: stand the pet upright and keep it still  -> "up" axis + gyro offset
+//  Step 2: lay it on its back, screen facing up      -> "out of screen" axis
+//  "right" follows from those two, so any mounting angle works. Saved to flash.
+// =====================================================================
+uint8_t calStage = 0;  // 0 = off, 1 = upright, 2 = on its back
+uint32_t calStartMs = 0;
+float calAcc[3], calGyro[3], calUp[3];
+int calCount = 0;
+
+static void calPrompt(const char *l1, const char *l2, uint32_t ms) {
+  overlayLine1 = l1;
+  overlayLine2 = l2;
+  showOverlay(OV_TEXT, ms);
+  Serial.printf("[cal] %s %s\n", l1, l2);
+}
+
+static void calResetAverage() {
+  calCount = 0;
+  memset(calAcc, 0, sizeof(calAcc));
+  memset(calGyro, 0, sizeof(calGyro));
+}
+
+void startCalibration() {
+  if (!imuOk) { Serial.println(F("[cal] no motion sensor")); return; }
+  if (activity != ACT_AWAKE) setActivity(ACT_AWAKE);
+  calStage = 1;
+  calStartMs = millis();
+  calResetAverage();
+  react(faceWith(DEFAULT), 600000);  // neutral face while calibrating
+  lookAt(0, -1);
+  calPrompt("CALIBRATE 1/2", "stand me upright", 0);
+  say(S_CONNECTION);
+}
+
+static void calFinish(bool ok, const char *why) {
+  calStage = 0;
+  reactionUntil = millis();
+  if (ok) {
+    calPrompt("Calibrated!", "saved to memory", 2500);
+    say(S_SUPER_HAPPY);
+  } else {
+    calPrompt("Calibration failed", why, 3000);
+    say(S_SAD);
+  }
+}
+
+static void norm3(float v[3]) {
+  float m = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (m > 1e-6f) for (int i = 0; i < 3; i++) v[i] /= m;
+}
+
+// Called after every IMU sample while calibrating.
+void calibrationStep() {
+  if (!calStage) return;
+  if (since(calStartMs) > 120000) { calFinish(false, "timed out"); return; }
+
+  // Average only while held perfectly still; any movement restarts the average.
+  float m = sqrtf(rawAcc[0] * rawAcc[0] + rawAcc[1] * rawAcc[1] + rawAcc[2] * rawAcc[2]);
+  if (jerk > 0.02f || fabsf(m - 1.0f) > 0.12f) { calResetAverage(); return; }
+
+  if (calStage == 2) {  // must really have been turned onto its back first
+    float d = (rawAcc[0] * calUp[0] + rawAcc[1] * calUp[1] + rawAcc[2] * calUp[2]) / m;
+    if (d > 0.5f) { calResetAverage(); return; }
+  }
+
+  for (int i = 0; i < 3; i++) { calAcc[i] += rawAcc[i]; calGyro[i] += rawGyro[i]; }
+  if (++calCount < 150) return;  // ~1.5 s of stillness
+  for (int i = 0; i < 3; i++) { calAcc[i] /= calCount; calGyro[i] /= calCount; }
+
+  if (calStage == 1) {
+    memcpy(calUp, calAcc, sizeof(calUp));
+    norm3(calUp);
+    memcpy(gyroBias, calGyro, sizeof(gyroBias));
+    calStage = 2;
+    calResetAverage();
+    calPrompt("CALIBRATE 2/2", "lay me on my back", 0);
+    say(S_BUTTON_PUSHED);
+    return;
+  }
+
+  // Out-of-screen axis = step-2 gravity with the "up" part removed.
+  float out[3], dot = calAcc[0] * calUp[0] + calAcc[1] * calUp[1] + calAcc[2] * calUp[2];
+  for (int i = 0; i < 3; i++) out[i] = calAcc[i] - dot * calUp[i];
+  float om = sqrtf(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+  if (om < 0.5f) { calFinish(false, "lay it flat on back"); return; }
+  norm3(out);
+  float right[3] = {calUp[1] * out[2] - calUp[2] * out[1],   // right = up x out
+                    calUp[2] * out[0] - calUp[0] * out[2],
+                    calUp[0] * out[1] - calUp[1] * out[0]};
+  for (int i = 0; i < 3; i++) {
+    imuRot[0][i] = right[i];
+    imuRot[1][i] = calUp[i];
+    imuRot[2][i] = out[i];
+  }
+  imuCalibrated = true;
+  imuRestart = true;
+  saveMounting();
+  Serial.printf("[cal] right=(%.2f %.2f %.2f) up=(%.2f %.2f %.2f) out=(%.2f %.2f %.2f) gyroBias=(%.1f %.1f %.1f)\n",
+                right[0], right[1], right[2], calUp[0], calUp[1], calUp[2], out[0], out[1], out[2],
+                gyroBias[0], gyroBias[1], gyroBias[2]);
+  calFinish(true, "");
+}
+
+// =====================================================================
 //  SERIAL CONSOLE (115200 baud) - for testing and tuning
 // =====================================================================
 void printStatus() {
   Serial.printf("activity=%s orient=%s happiness=%.0f energy=%.0f age=%luh\n",
                 ACTIVITY_NAMES[activity], ORIENT_NAMES[orient], happiness, energy, (unsigned long)(ageMinutes / 60));
-  Serial.printf("present=%d breakDue=%d work=%lumin quiet=%lus chattiness=%d muted=%d imu=%d temp=%.1fC overlay=%s\n",
+  Serial.printf("present=%d breakDue=%d work=%lumin quiet=%lus chattiness=%d muted=%d imu=%d calibrated=%d overlay=%s\n",
                 present(), breakDue, workActive ? (unsigned long)(since(workStart) / 60000) : 0UL,
-                (unsigned long)(since(lastInteraction) / 1000), chattiness, muted, imuOk, tempC, OVERLAY_NAMES[overlay]);
+                (unsigned long)(since(lastInteraction) / 1000), chattiness, muted, imuOk, imuCalibrated, OVERLAY_NAMES[overlay]);
+  Serial.printf("gyro bias %.2f %.2f %.2f dps\n", gyroBias[0], gyroBias[1], gyroBias[2]);
 }
 
 void printHelp() {
-  Serial.println(F("commands: status imu mute unmute chatty <0-3> sleep wake pet boop sing scare annoy dizzy"));
+  Serial.println(F("commands: status imu calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing"));
+  Serial.println(F("          scare annoy dizzy"));
   Serial.println(F("          hiccup sneeze greet break birthday happy sad angry sound <id> reset"));
 }
 
@@ -1469,6 +1650,8 @@ void runCommand(String cmd) {
   if (cmd == "help") printHelp();
   else if (cmd == "status") printStatus();
   else if (cmd == "imu") { imuStream = !imuStream; }
+  else if (cmd == "calibrate") startCalibration();
+  else if (cmd == "calreset") { clearMounting(); Serial.println(F("Calibration cleared - using config.h mapping")); }
   else if (cmd == "mute") { muted = true; hush(); }
   else if (cmd == "unmute") { muted = false; }
   else if (cmd.startsWith("chatty ")) { chattiness = constrain(cmd.substring(7).toInt(), 0, 3); }
@@ -1532,7 +1715,9 @@ void setup() {
 
   delay(1500);  // give USB serial a moment so the boot log is visible
   i2cScan();
+  loadMounting();
   imuOk = imuBegin();
+  if (imuOk) imuMeasureGyroBias();
   if (!imuOk) Serial.println(F("Motion sensor not found at 0x68/0x69 - running without motion sensing"));
 
   cute.init(PIN_BUZZER);
@@ -1578,6 +1763,7 @@ void loop() {
   if (imuOk && now - lastImu >= 10) {  // ~100 Hz
     lastImu = now;
     imuStep();
+    calibrationStep();
   }
   serialStep();
 
@@ -1601,6 +1787,11 @@ void loop() {
 
   if (now - lastBrain >= 20) {  // 50 Hz
     lastBrain = now;
+    if (calStage) {  // the pet holds still while it is being calibrated
+      ev = MotionEvents();
+      vTaskDelay(1);
+      return;
+    }
     handleMotionEvents();
     presenceStep();
     breakBuddyStep();
