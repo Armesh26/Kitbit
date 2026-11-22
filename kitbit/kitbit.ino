@@ -56,8 +56,8 @@ typedef Adafruit_SH1106G OledDisplay;
 #else
 #include <Adafruit_SSD1306.h>
 typedef Adafruit_SSD1306 OledDisplay;
-#define OLED_WHITE        OLED_WHITE
-#define OLED_BLACK        OLED_BLACK
+#define OLED_WHITE        SSD1306_WHITE
+#define OLED_BLACK        SSD1306_BLACK
 #define OLED_ON_CMD       SSD1306_DISPLAYON
 #define OLED_OFF_CMD      SSD1306_DISPLAYOFF
 #define oledBegin()       display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)
