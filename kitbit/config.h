@@ -154,8 +154,12 @@
 // "Off" = deep sleep with the screen and motion sensor powered down.
 // It wakes up when you move / turn it (or press RESET, or plug in a charger).
 #define AUTO_OFF_FACEDOWN_MIN 5    // on battery: lying face down this long = switch off (0 = never)
+// Switching off by hand: put it face down and double-tap it. To switch it back on: turn it
+// over (or move it) - within OFF_CHECK_S it shows "tap tap to wake" - and double-tap it.
 #define OFF_CHECK_S        2       // how often the sleeping pet checks whether it was moved
-#define OFF_WAKE_DEG       30.0f   // that much turning wakes it up
+#define OFF_WAKE_DEG       30.0f   // that much turning makes it listen for the double tap
+#define OFF_LISTEN_MS      6000    // how long it listens (screen hint on) before sleeping again
+#define OFF_TAP_G          0.15f   // jolt that counts as a tap while it is listening (IMU only)
 
 // ---------------- Memory -------------------------------------------------
 #define REMEMBER_MOOD      1       // keep happiness/energy/age in flash across power cycles

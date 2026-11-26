@@ -1414,7 +1414,17 @@ void onScratchEnd(uint32_t ms) {
 }
 
 void onTaps(uint8_t n, float side) {
-  if (activity == ACT_HIDING) return;
+  if (activity == ACT_HIDING) {
+    // Face down + double tap = switch off. It can't be seen, so it sings goodnight.
+    if (n == 2) {
+      Serial.println(F("[power] face down + double tap: goodnight"));
+      hidingQuiet = false;
+      say(SND_GOODNIGHT, 1, true);
+      delay(2200);
+      powerOff(OFF_USER, false);
+    }
+    return;
+  }
 
   if (since(recentTapsSince) > 10000) { recentTapsSince = millis(); recentTaps = 0; }
   recentTaps += n;
@@ -2386,7 +2396,7 @@ void powerOff(OffReason why, bool animate) {
     react(f, 10000);
     lookAt(0, 0.3f);
     if (why == OFF_BATTERY) battText("too hungry...", "plug me in! zzz", 0);
-    else battText("goodnight!", "move me to wake", 0);
+    else battText("goodnight!", "flip + tap tap", 0);
     say(SND_GOODNIGHT, 1, true);
     delay(2800);
     { BusLock lock; eyes.close(); }
@@ -2412,8 +2422,71 @@ void powerOff(OffReason why, bool animate) {
   esp_deep_sleep_start();
 }
 
-// First thing at boot: if we were "off", take a quick look and go back to sleep
-// unless someone moved the pet or plugged in a charger. Takes a few ms.
+// While "off" and just moved: show sleepy eyes + "tap tap to wake" and listen for a
+// double tap with the IMU alone (the mic task isn't running yet). True = wake up.
+static bool offListenForDoubleTap() {
+  if (!rtcImuAddr) return false;
+  imuWrite(0x6B, 0x01);  // wake the sensor (it kept its settings while asleep)
+  imuWrite(0x6A, 0x00);  // FIFO off: plain register reads here
+  delay(30);
+  Wire.setClock(I2C_IDLE_HZ);
+  bool screen = oledBegin();
+  if (screen) {
+    display.setRotation(DISPLAY_ROTATION);
+    display.setTextWrap(false);
+    display.clearDisplay();
+    int cy = (SCREEN_HEIGHT - SCREEN_HIDDEN_BOTTOM) / 2 - 8;
+    int lx = SCREEN_WIDTH / 2 - EYE_GAP / 2 - EYE_W, rx = SCREEN_WIDTH / 2 + EYE_GAP / 2;
+    display.fillRoundRect(lx, cy, EYE_W, 4, 2, OLED_WHITE);  // closed, sleepy eyes
+    display.fillRoundRect(rx, cy, EYE_W, 4, 2, OLED_WHITE);
+    display.setTextSize(1);
+    display.setTextColor(OLED_WHITE);
+    display.setCursor(19, cy + 18);
+    display.print(F("tap tap to wake"));
+    display.display();
+    oledDim(true);
+  }
+  float g[3] = {0, 0, 0};
+  bool haveG = false, armed = true;
+  uint32_t start = millis(), firstTap = 0, lastTap = 0;
+  bool woke = false;
+  while (millis() - start < OFF_LISTEN_MS) {
+    uint8_t b[6];
+    if (imuRead(0x3B, b, 6)) {
+      float s[3], d[3], m = 0;
+      for (int k = 0; k < 3; k++) s[k] = (int16_t)(b[k * 2] << 8 | b[k * 2 + 1]) / 8192.0f;
+      if (!haveG) { memcpy(g, s, sizeof g); haveG = true; }
+      for (int k = 0; k < 3; k++) { d[k] = s[k] - g[k]; m += d[k] * d[k]; g[k] += d[k] * 0.02f; }
+      m = sqrtf(m);
+      uint32_t now = millis();
+      if (armed && m > OFF_TAP_G) {
+        armed = false;
+        lastTap = now;
+        if (firstTap && now - firstTap >= 80 && now - firstTap <= 700) { woke = true; break; }
+        firstTap = now;
+      }
+      if (!armed && m < OFF_TAP_G * 0.5f && now - lastTap > 100) armed = true;
+      if (firstTap && now - firstTap > 700) firstTap = 0;
+      // Put face down again: no.
+      float gm = sqrtf(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]), dot = 0;
+      for (int k = 0; k < 3; k++) dot += g[k] / gm * rtcOffGrav[k];
+      if (now - start > 500 && dot > cosf(OFF_WAKE_DEG * 0.5f * DEG_TO_RAD)) break;
+    }
+    delay(4);
+  }
+  if (!woke) {
+    if (screen) oledCommand(OLED_OFF_CMD);
+    // Remember where it is now: it only listens again after the next move.
+    float gm = sqrtf(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+    if (haveG && gm > 0.3f) for (int k = 0; k < 3; k++) rtcOffGrav[k] = g[k] / gm;
+    imuWrite(0x6B, 0x40);
+  }
+  return woke;
+}
+
+// First thing at boot: if we were "off", take a quick look and go back to sleep.
+//  - switched off by hand: wake only for "moved, then double-tapped"
+//  - battery empty: wake only when a charger was plugged in
 void offModeCheck() {
   if (rtcOffReason == OFF_NONE) return;
   if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) { rtcOffReason = OFF_NONE; return; }  // RESET / power cycle
@@ -2422,7 +2495,7 @@ void offModeCheck() {
 #if ENABLE_BATTERY
   float v = battReadVolts();
   if (rtcOffVolt > 2.5f && v > 2.5f) {
-    if (v > rtcOffVolt + 0.25f) wake = true;                                // charger plugged in
+    if (rtcOffReason == OFF_BATTERY && v > rtcOffVolt + 0.25f) wake = true;              // charger plugged in
     else if (rtcOffReason == OFF_USER && v < BATT_SHUTDOWN_V) rtcOffReason = OFF_BATTERY;  // drained while off
   }
 #endif
@@ -2433,15 +2506,17 @@ void offModeCheck() {
     delay(30);
     uint8_t b[6];
     bool ok = imuRead(0x3B, b, 6);
-    imuWrite(0x6B, 0x40);
+    bool moved = false;
     if (ok) {
       float a[3], m = 0;
       for (int i = 0; i < 3; i++) { a[i] = (int16_t)(b[i * 2] << 8 | b[i * 2 + 1]); m += a[i] * a[i]; }
       m = sqrtf(m);
       float dot = 0;
       if (m > 0) for (int i = 0; i < 3; i++) dot += a[i] / m * rtcOffGrav[i];
-      if (dot < cosf(OFF_WAKE_DEG * DEG_TO_RAD)) wake = true;  // turned / picked up
+      moved = dot < cosf(OFF_WAKE_DEG * DEG_TO_RAD);  // turned over / picked up
     }
+    if (moved) wake = offListenForDoubleTap();
+    else imuWrite(0x6B, 0x40);
   }
   if (wake) {
     wokeFrom = (OffReason)rtcOffReason;

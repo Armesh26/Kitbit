@@ -104,11 +104,16 @@ Charging is detected in three ways:
 The percentage is an estimate from the voltage, so it isn't shown while charging.
 
 ### Switching it off
-There's no power switch, so "off" means deep sleep: the screen and motion sensor sleep, and the chip wakes for a few milliseconds every 2 s to check whether it has been moved.
-- **Put it face down for 5 min while on battery**, or type `off`. With `off` it says "goodnight!" first.
-- **To switch it back on**, turn or pick it up (more than 30°), plug in a charger, or press RESET.
+There's no power switch, so "off" means deep sleep: the screen, motion sensor and mic all sleep, and the chip wakes for a few milliseconds every 2 s to check whether it has been turned over.
 
-In deep sleep the battery still drains very slowly, so for long storage unplug the battery.
+- **To switch it off,** put it face down, then double-tap it. It sings a short goodnight lullaby and switches off. It also switches off by itself after 5 min face down on battery, or when you type `off`.
+- **To switch it back on:**
+  1. Turn it face up, or move it. Within about 2 s it shows sleepy eyes and "tap tap to wake".
+  2. Double-tap it while that's on screen. It listens for 6 s, then goes back to sleep.
+- **Pressing RESET always turns it on.**
+- **Nothing else wakes it.** Bumps, leaving it upright and plugging in a charger don't.
+
+In deep sleep the battery still drains slowly, so for long storage unplug the battery.
 
 ## Serial commands (115200 baud)
 
