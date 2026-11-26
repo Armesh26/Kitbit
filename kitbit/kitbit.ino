@@ -858,6 +858,9 @@ void imuFifoReset() {
 const uint8_t HIT_PENDING = 0, HIT_TAP = 1, HIT_SLAM = 2;
 uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickVerdict[8] = {0};  uint8_t kickIdx = 0;
 bool slamPending = false;
+// Plain jolt log for the face-down "switch off" double tap: face down on the desk every
+// tap rings like a slam, so the normal tap logic (mic click + non-ringing jolt) can't be used.
+uint32_t joltLog[4];  volatile uint32_t joltLogCount = 0;
 
 // Drains the whole FIFO (250 Hz) and returns the biggest kick away from gravity (g),
 // with its direction in the sensor frame. Returns -1 if nothing was read.
@@ -913,6 +916,22 @@ float imuFifoPeak(float dir[3]) {
           if (m > SLAM_RING_G && t - hitStart >= SLAM_RING_FROM_MS) hitRings = true;
         }
         lastAbove = t;
+      }
+      static bool joltArmed = true;
+      static uint32_t joltCalm = 0;
+      if (joltArmed && m > OFF_TAP_G) {
+        joltArmed = false;
+        joltCalm = 0;
+        joltLog[joltLogCount % 4] = t;
+        joltLogCount = joltLogCount + 1;
+        if (tapDebug) Serial.printf("E,%lu,jolt,%.2f\n", (unsigned long)t, m);
+      } else if (!joltArmed) {  // re-arm once it has been calm for 60 ms (the desk may ring)
+        if (m < OFF_TAP_G * 0.5f) {
+          if (!joltCalm) joltCalm = t;
+          if (t - joltCalm >= 60) joltArmed = true;
+        } else {
+          joltCalm = 0;
+        }
       }
       if (hitOpen && t - hitStart > SLAM_RING_TO_MS) {
         hitOpen = false;
@@ -1413,18 +1432,29 @@ void onScratchEnd(uint32_t ms) {
   say(S_HAPPY);
 }
 
-void onTaps(uint8_t n, float side) {
-  if (activity == ACT_HIDING) {
-    // Face down + double tap = switch off. It can't be seen, so it sings goodnight.
-    if (n == 2) {
-      Serial.println(F("[power] face down + double tap: goodnight"));
-      hidingQuiet = false;
-      say(SND_GOODNIGHT, 1, true);
-      delay(2200);
-      powerOff(OFF_USER, false);
-    }
-    return;
+// Face down + double tap = switch off. It can't be seen, so it sings goodnight.
+void switchOffFromHiding() {
+  Serial.println(F("[power] face down + double tap: goodnight"));
+  hidingQuiet = false;
+  say(SND_GOODNIGHT, 1, true);
+  delay(2200);
+  powerOff(OFF_USER, false);
+}
+
+// While face down: two jolts 0.1-0.7 s apart (after it has lain still for 1.5 s).
+void hidingDoubleTapStep() {
+  static uint32_t seen = 0, prev = 0;
+  while (seen != joltLogCount) {
+    uint32_t t = joltLog[seen % 4];
+    seen++;
+    if (activity != ACT_HIDING || (int32_t)(t - activitySince) < 1500) { prev = 0; continue; }
+    if (prev && t - prev >= 100 && t - prev <= 700) { prev = 0; switchOffFromHiding(); return; }
+    prev = t;
   }
+}
+
+void onTaps(uint8_t n, float side) {
+  if (activity == ACT_HIDING) return;  // face down: see hidingDoubleTapStep()
 
   if (since(recentTapsSince) > 10000) { recentTapsSince = millis(); recentTaps = 0; }
   recentTaps += n;
@@ -2739,6 +2769,7 @@ void loop() {
       return;
     }
     handleMotionEvents();
+    hidingDoubleTapStep();
     presenceStep();
     breakBuddyStep();
     activityStep();
