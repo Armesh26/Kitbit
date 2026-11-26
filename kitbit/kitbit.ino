@@ -849,7 +849,10 @@ void imuFifoReset() {
 
 // Recent jolts of the pet with their exact time (from the sample's place in the FIFO),
 // so they can be matched with mic clicks even when the bus was busy with the screen.
-uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickIdx = 0;
+// Each jolt is a "hit": after SLAM_RING_TO_MS it is judged a tap or a desk slam.
+const uint8_t HIT_PENDING = 0, HIT_TAP = 1, HIT_SLAM = 2;
+uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickVerdict[8] = {0};  uint8_t kickIdx = 0;
+bool slamPending = false;
 
 // Drains the whole FIFO (250 Hz) and returns the biggest kick away from gravity (g),
 // with its direction in the sensor frame. Returns -1 if nothing was read.
@@ -883,12 +886,39 @@ float imuFifoPeak(float dir[3]) {
       m = sqrtf(m);
       if (m > peak) { peak = m; memcpy(dir, d, sizeof d); }
       uint32_t t = now - (uint32_t)(total - 1 - (done + i)) * 4;  // 4 ms per sample
-      if (m > TAP_CONFIRM_G && t - lastKickAt > 30) {
+      // Tap or slam: a finger tap is one short jolt, a slam on the desk makes the
+      // pet keep shaking for ~80 ms while the desk rings.
+      static bool hitOpen = false, hitRings = false;
+      static uint32_t hitStart = 0, lastAbove = 0;
+      static float hitPeak = 0;
+      static uint8_t hitSlot = 0;
+      if (m > TAP_CONFIRM_G) {
+        if (!hitOpen && t - lastAbove > 60) {
+          hitOpen = true;
+          hitRings = false;
+          hitStart = t;
+          hitPeak = m;
+          hitSlot = kickIdx;
+          kickMs[kickIdx] = t;
+          kickSide[kickIdx] = toBody(d).x;
+          kickVerdict[kickIdx] = HIT_PENDING;
+          kickIdx = (kickIdx + 1) % 8;
+        } else if (hitOpen) {
+          if (m > hitPeak) { hitPeak = m; kickSide[hitSlot] = toBody(d).x; }
+          if (m > SLAM_RING_G && t - hitStart >= SLAM_RING_FROM_MS) hitRings = true;
+        }
+        lastAbove = t;
+      }
+      if (hitOpen && t - hitStart > SLAM_RING_TO_MS) {
+        hitOpen = false;
+        bool slam = hitRings && hitPeak > SLAM_MIN_G;
+        kickVerdict[hitSlot] = slam ? HIT_SLAM : HIT_TAP;
+        if (slam && !soundPlaying) slamPending = true;
+        if (tapDebug) Serial.printf("H,%lu,%s,%.2f\n", (unsigned long)hitStart, slam ? "slam" : "tap", hitPeak);
+      }
+      if (tapDebug && m > TAP_CONFIRM_G && t - lastKickAt > 30) {
         lastKickAt = t;
-        kickMs[kickIdx] = t;
-        kickSide[kickIdx] = toBody(d).x;
-        kickIdx = (kickIdx + 1) % 8;
-        if (tapDebug) {  // K,ms,size g,body right,up,out (direction of the jolt)
+        {  // K,ms,size g,body right,up,out (direction of the jolt)
           Vec3 bd = toBody(d);
           Serial.printf("K,%lu,%.3f,%.3f,%.3f,%.3f\n", (unsigned long)t, m, bd.x, bd.y, bd.z);
         }
@@ -899,16 +929,18 @@ float imuFifoPeak(float dir[3]) {
   return peak;
 }
 
-// Was there a jolt close to time t? Uses it up, so one jolt confirms one click.
-bool takeKickNear(uint32_t t, float *side) {
+// Was there a hit close to time t? Returns HIT_TAP / HIT_SLAM (and uses it up, so one
+// hit confirms one click), -1 if that hit isn't judged yet, 0 if there was none.
+int takeKickNear(uint32_t t, float *side) {
   for (int i = 0; i < 8; i++) {
     if (kickMs[i] && (uint32_t)abs((int32_t)(kickMs[i] - t)) <= TAP_MATCH_MS) {
+      if (kickVerdict[i] == HIT_PENDING) return -1;
       *side = kickSide[i];
       kickMs[i] = 0;
-      return true;
+      return kickVerdict[i];
     }
   }
-  return false;
+  return 0;
 }
 
 void imuStep() {
@@ -1031,7 +1063,15 @@ void imuStep() {
   static uint32_t pending[8];
   static uint8_t pendingN = 0;
   if (!fifoOk && tapG > TAP_CONFIRM_G) {  // no FIFO: best effort with the step time
-    kickMs[kickIdx] = now; kickSide[kickIdx] = dyn.x; kickIdx = (kickIdx + 1) % 8;
+    kickMs[kickIdx] = now; kickSide[kickIdx] = dyn.x; kickVerdict[kickIdx] = HIT_TAP; kickIdx = (kickIdx + 1) % 8;
+  }
+  if (slamPending) {  // the desk rang: someone slammed it
+    slamPending = false;
+    if (!handling && !falling && !shaking) {
+      ev.bump = true;
+      tapCount = 0;
+      if (tapDebug) Serial.printf("E,%lu,bump\n", (unsigned long)now);
+    }
   }
   if (micOk) {
     while (seenClicks != micClickCount) {
@@ -1042,10 +1082,13 @@ void imuStep() {
     }
     for (uint8_t p = 0; p < pendingN;) {
       float side = 0;
-      bool jolted = TAP_SOURCE == 2 || takeKickNear(pending[p], &side);
-      bool expired = now - pending[p] > TAP_MATCH_MS + 150;
-      if (jolted || expired) {
-        if (jolted && !handling && !falling && !shaking) {
+      int hit = TAP_SOURCE == 2 ? HIT_TAP : takeKickNear(pending[p], &side);
+      bool expired = now - pending[p] > TAP_MATCH_MS + SLAM_RING_TO_MS + 150;  // hit judged + sensor read late
+      bool jolted = hit == HIT_TAP;
+      if (hit == HIT_TAP || hit == HIT_SLAM || expired) {
+        if (hit == HIT_SLAM) {
+          if (tapDebug) Serial.printf("E,%lu,click_slam\n", (unsigned long)now);  // part of the slam, not a tap
+        } else if (jolted && !handling && !falling && !shaking) {
           tapCount++;
           tapSide += side;
           lastTapMs = now;

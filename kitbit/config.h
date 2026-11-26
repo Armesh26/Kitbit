@@ -75,6 +75,13 @@
 #define MIC_CLICK_MIN      8000.0f // ...and at least this loud (watch "mic" on serial to tune)
 #define TAP_CONFIRM_G      0.05f   // the tiny IMU jolt that confirms a mic click was on the pet
 #define TAP_MATCH_MS       50      // click and jolt must be this close in time
+// Tap or desk slam? Measured: after a slam the desk keeps the pet shaking for ~70-85 ms,
+// after a finger tap the jolt is gone at once. So a jolt that is still above SLAM_RING_G
+// SLAM_RING_FROM_MS after it started (checked until SLAM_RING_TO_MS) was a slam.
+#define SLAM_RING_G        0.10f
+#define SLAM_RING_FROM_MS  45
+#define SLAM_RING_TO_MS    130
+#define SLAM_MIN_G         0.30f   // and it has to be at least this big
 #define TAP_WINDOW_MS      450     // taps closer than this are grouped (double / triple tap)
 #define HANDLE_GYRO_DPS    25.0f   // rotation that means "someone is holding me"
 #define SHAKE_G            1.0f    // movement (g) that counts towards shaking; gentle handling stays below
