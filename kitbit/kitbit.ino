@@ -1045,7 +1045,11 @@ void imuStep() {
   // --- on a surface or in a hand? ---
   gyroAvg += (gyroMag - gyroAvg) * 0.05f;
   static uint32_t calmSince = 0, restlessSince = 0;
-  if (gyroAvg < SURFACE_GYRO_DPS) { restlessSince = 0; if (!calmSince) calmSince = now; }
+  static const float uprightCos = cosf(SURFACE_TILT_DEG * DEG_TO_RAD);
+  float gl = grav.len();
+  bool standing = gl > 0.5f && grav.y / gl > uprightCos;  // exactly its desk pose
+  if (!standing) { onSurface = false; calmSince = 0; }
+  else if (gyroAvg < SURFACE_GYRO_DPS) { restlessSince = 0; if (!calmSince) calmSince = now; }
   else { calmSince = 0; if (!restlessSince) restlessSince = now; }
   if (!onSurface && calmSince && now - calmSince > 1000) onSurface = true;
   // A tap on the desk rotates the pet for a moment: only leave "surface" if it lasts.

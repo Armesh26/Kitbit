@@ -71,7 +71,7 @@
 #define PIN_MIC_WS         D3
 #define PIN_MIC_SD         D10
 #define TAP_SOURCE         1       // 0 = IMU only, 1 = mic click + IMU jolt together (best), 2 = mic only
-#define MIC_CLICK_RATIO    6.0f    // a click is this many times louder than the background
+#define MIC_CLICK_RATIO    4.0f    // a click is this many times louder than the background (a hand muffles the mic)
 #define MIC_CLICK_MIN      8000.0f // ...and at least this loud (watch "mic" on serial to tune)
 // All IMU jolt sizes below are measured on the FAST part of the motion only (above
 // ~20 Hz): a tap is a sharp spike, moving / tilting / holding the pet is slow and is
@@ -86,9 +86,11 @@
 #define SLAM_RING_FROM_MS  45
 #define SLAM_RING_TO_MS    130
 #define SLAM_MIN_G         0.20f   // and it has to be at least this big
-// Slams only exist when it stands on something solid. "On a surface" = almost no
-// rotation at all (a hand always trembles a little). Average gyro below this:
+// Slams only exist when it stands on something solid. Measured: a still hand is as quiet
+// as a desk for this sensor, so "on a surface" = standing upright in its calibrated pose
+// (a hand practically never holds it that exactly) and not rotating.
 #define SURFACE_GYRO_DPS   2.5f
+#define SURFACE_TILT_DEG   8.0f
 #define TAP_MAX_GYRO_DPS   150.0f  // turning faster than this = being swung around, not tapped
 #define PICKUP_IGNORE_MS   700     // grabbing it makes clicks and jolts too
 
