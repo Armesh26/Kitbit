@@ -92,6 +92,7 @@ class Ears {
   void feed(int32_t v, bool selfSound, uint32_t now) {
     sampleIdx++;
     dirty |= selfSound;
+    clean16 = selfSound ? 0 : clean16 + 1;  // 16 kHz samples since our own buzzer was last on
     whistleSample(v, now);
     // Anti-alias low-pass (2 x biquad, 1.5 kHz) before going down to 4 kHz: without it,
     // overtones above 2 kHz fold back as fake notes and wreck key / chord detection.
@@ -110,6 +111,7 @@ class Ears {
   G gs[NOTES];
   int32_t dec = 0, decN = 0, gN = 0;
   bool dirty = false, blockDirty = false;
+  uint32_t clean16 = 0, clean4 = 0;  // the pitch detectors need a window with no buzzer at all in it
   float chromaLong[12] = {0}, chromaShort[12] = {0};
   float chromaKey[12] = {0};  // ~6 s: music keeps its key, talking averages out to "no key"
   float chromaBeat[12] = {0}; // ~0.5 s: for the stable chord
@@ -180,7 +182,7 @@ class Ears {
   void whistleFrame(uint32_t now) {
     bool ok = false;
     float midi = 0;
-    if (zcN >= 9 && !frameDirty) {
+    if (zcN >= 9 && clean16 >= 256) {  // the whole 16 ms frame free of our own buzzer
       float period = (float)(zcLast - zcFirst) / (zcN - 1);  // samples
       float f = 16000.0f / period;
       // regular? (spread of the individual periods)
@@ -214,7 +216,8 @@ class Ears {
       g.s2 = g.s1;
       g.s1 = s;
     }
-    if (dirty) blockDirty = frameDirty = true;
+    if (dirty) { blockDirty = frameDirty = true; clean4 = 0; }
+    else clean4++;  // 4 kHz samples since our own buzzer was last on
     dirty = false;
     if (++gN >= GN) chromaBlock();
     // onset frame
@@ -452,7 +455,7 @@ class Ears {
 
   // Voice pitch (singing / humming): autocorrelation at 4 kHz, ~80-800 Hz.
   void humFrame(uint32_t now) {
-    if (acFill < 256 || frameDirty || st.loud < 8) {
+    if (acFill < 256 || clean4 < 256 || st.loud < 8) {  // the whole 64 ms window free of our own buzzer
       if (st.pitchKind == 2) st.pitch = false;
       heldNote(st.pitch && st.pitchKind == 1, st.pitchMidi);
       singingTimeout(now);

@@ -1725,6 +1725,9 @@ void musicStep() {
   static const char *NOTE_NAMES[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t now = millis();
   bool heard = micOk && (ears.st.music || ears.st.singing);
+  static uint32_t lastOwnSound = 0;
+  if (soundPlaying) lastOwnSound = now;
+  if (!dancing && now - lastOwnSound < 1500) heard = false;  // its own song is not music to dance to
   // Songs have stretches the detector doesn't like: while it's still hearing steady,
   // continuous sound, keep dancing a while instead of stopping and restarting.
   static uint32_t lastHeard = 0;
