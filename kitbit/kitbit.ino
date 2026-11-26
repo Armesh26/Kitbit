@@ -586,6 +586,8 @@ volatile float micBg = 0, micPeakMax = 0;  // for the "mic" serial stream
 volatile float micPeakDbg = 0;              // loudest chunk since the last tapdebug line
 volatile float micPeakWin = 0;              // loudest chunk in the current 100 ms scratch window
 bool scratching = false;  uint32_t scratchStartMs = 0, scratchEndMs = 0;
+uint16_t scratchBitsNow = 0;
+bool scratchLooking() { return __builtin_popcount(scratchBitsNow & 0x1F) >= 3; }  // 3 of the last 5 windows scratchy
 bool micStream = false;
 bool earsStream = false;  // "ears": music / pitch analysis twice a second
 bool tapDebug = false;  // "tapdebug": raw tap data at 100 Hz for tools/tap_test.py
@@ -924,12 +926,27 @@ float kickPeak[8] = {0};
 uint32_t actTimes[32];  uint8_t actIdx = 0;
 float bgJolt = 0.02f;  // typical jolt of whatever is going on around it (keystrokes on a laptop...)
 uint32_t typingUntil = 0;
-void logActivity(uint32_t t) { actTimes[actIdx] = t; actIdx = (actIdx + 1) % 32; }
-int activityBetween(uint32_t from, uint32_t to) {  // events with from <= t < to
+uint32_t busyUntil = 0;  // typing was seen recently: stricter tap checks until then
+// One touch makes a mic click AND a jolt: anything within 120 ms of the last event is the same touch.
+void logActivity(uint32_t t) {
+  uint32_t last = actTimes[(actIdx + 31) % 32];
+  if (last && (uint32_t)abs((int32_t)(t - last)) < 120) return;
+  actTimes[actIdx] = t;
+  actIdx = (actIdx + 1) % 32;
+}
+int activityBetween(uint32_t from, uint32_t to, uint32_t *first = nullptr, uint32_t *lastT = nullptr) {
   int n = 0;
-  for (int i = 0; i < 32; i++) if (actTimes[i] && (int32_t)(actTimes[i] - from) >= 0 && (int32_t)(actTimes[i] - to) < 0) n++;
+  for (int i = 0; i < 32; i++) {
+    uint32_t t = actTimes[i];
+    if (t && (int32_t)(t - from) >= 0 && (int32_t)(t - to) < 0) {
+      if (first && (!n || (int32_t)(t - *first) < 0)) *first = t;
+      if (lastT && (!n || (int32_t)(t - *lastT) > 0)) *lastT = t;
+      n++;
+    }
+  }
   return n;
 }
+bool scratchLooking();  // (scratch detection, further down)
 bool slamPending = false;
 uint32_t slamAt = 0;
 // Plain jolt log for the face-down "switch off" double tap: face down on the desk every
@@ -1222,13 +1239,18 @@ void imuStep() {
       seenClicks++;
     }
     bgJolt += (0.02f - bgJolt) * 0.003f;  // quiet again: back to the floor within ~5 s
-    // Typing: a stream of clicks / jolts. No taps until it has calmed down.
-    if (activityBetween(now - TYPING_WINDOW_MS, now + 1) >= TYPING_EVENTS) {
+    // Typing: a sustained stream of separate touches (not one burst of taps, not the
+    // continuous noise of a head scratch). No taps until it has calmed down.
+    uint32_t first = 0, lastT = 0;
+    int recentN = activityBetween(now - TYPING_WINDOW_MS, now + 1, &first, &lastT);
+    if (recentN >= TYPING_EVENTS && lastT - first >= TYPING_MIN_SPAN_MS && !scratching && !scratchLooking()) {
       if ((int32_t)(typingUntil - now) <= 0 && tapDebug) Serial.printf("E,%lu,typing\n", (unsigned long)now);
       typingUntil = now + TYPING_QUIET_MS;
+      busyUntil = now + TYPING_BUSY_MS;
       tapCount = 0;
     }
     bool typing = (int32_t)(typingUntil - now) > 0;
+    bool busy = (int32_t)(busyUntil - now) > 0;  // only then the stricter checks below
     for (uint8_t p = 0; p < pendingN;) {
       float side = 0, peak = 0;
       int hit = TAP_SOURCE == 2 ? HIT_TAP : takeKickNear(pending[p], &side, &peak);
@@ -1240,11 +1262,11 @@ void imuStep() {
         } else if (jolted && !tapBlocked) {
           const char *why = nullptr;
           if (typing) why = "typing";
-          else if (TAP_SOURCE != 2 && peak < bgJolt * TAP_REL) why = "weak";  // no stronger than the background
-          else if (!tapCount && activityBetween(pending[p] - TAP_QUIET_BEFORE_MS, pending[p] - TAP_MATCH_MS) > 0) why = "noquiet";
+          else if (busy && TAP_SOURCE != 2 && peak < bgJolt * TAP_REL) why = "weak";  // no stronger than the background
+          else if (busy && !tapCount && activityBetween(pending[p] - TAP_QUIET_BEFORE_MS, pending[p] - TAP_MATCH_MS) > 0) why = "noquiet";
           if (why) {
             if (tapDebug) Serial.printf("E,%lu,click_%s\n", (unsigned long)now, why);
-          } else if (++tapCount > TAP_MAX_GROUP) {  // too many in a row: that's typing
+          } else if (++tapCount > TAP_MAX_GROUP && busy) {  // too many in a row on a busy surface: typing
             tapCount = 0;
             typingUntil = now + TYPING_QUIET_MS;
             if (tapDebug) Serial.printf("E,%lu,click_toomany\n", (unsigned long)now);
@@ -1293,6 +1315,7 @@ void imuStep() {
     micPeakWin = 0;
     winSound = false;
   }
+  scratchBitsNow = scratchBits;
   // No taps while (or right after) being scratched: every stroke sounds like a click.
   // A tap group that looked scratchy at any point is thrown away.
   static bool tapGroupScratchy = false;

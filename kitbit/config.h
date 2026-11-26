@@ -81,8 +81,10 @@
 #define TAP_MATCH_MS       150     // click and jolt must be this close in time (measured: usually <35 ms, seen 115)
 // Typing vs tapping (e.g. the pet sitting on a laptop): typing is a stream of clicks and
 // jolts; taps stand out from quiet and from the background jolts of the surface.
-#define TYPING_EVENTS      5       // this many clicks / jolts within TYPING_WINDOW_MS = typing...
-#define TYPING_WINDOW_MS   2000
+#define TYPING_EVENTS      6       // this many touches (click + jolt = one) within TYPING_WINDOW_MS...
+#define TYPING_WINDOW_MS   2500
+#define TYPING_MIN_SPAN_MS 1500    // ...spread over at least this long (a quick triple tap never is) = typing
+#define TYPING_BUSY_MS     10000   // after typing: stricter tap checks for this long (quiet desk: none)
 #define TYPING_QUIET_MS    1200    // ...and no taps until it has been quiet this long
 #define TAP_QUIET_BEFORE_MS 700    // a tap group must start after this much quiet
 #define TAP_MAX_GROUP      4       // more events in one group = not tapping
