@@ -101,7 +101,10 @@ Charging is detected in three ways:
 - **The 5V sense pin**, if you fit it.
 - **Otherwise, from the voltage jumping up or down when the cable goes in or out.** With a phone charger that can take a few seconds, or a few minutes when you unplug it while it's full.
 
-The percentage is an estimate from the voltage, so it isn't shown while charging.
+The percentage is an estimate from the voltage.
+- **While charging it only counts up.** It's estimated from slightly below the reading, because charging pushes the voltage up.
+- **It calibrates itself.** The ESP's voltage reading and 5% resistors can be a few percent off, which made it stop at about 86–88%. When the voltage stays flat for 10 minutes while charging, the charger is holding the cell at exactly 4.20 V, so the pet learns its correction from that and saves it.
+- **You can also calibrate it by hand.** Measure BAT+ with a multimeter and type `battcal 4.13` (your reading). `battcal reset` clears the correction.
 
 ### Face down and switching off
 

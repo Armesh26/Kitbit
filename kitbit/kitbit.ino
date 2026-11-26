@@ -2233,6 +2233,7 @@ void calibrationStep() {
 // =====================================================================
 RTC_DATA_ATTR uint8_t rtcOffReason = OFF_NONE;  // survives deep sleep
 RTC_DATA_ATTR float rtcOffVolt = 0;
+RTC_DATA_ATTR float battCal = 1.0f;  // learned ADC correction (saved in flash, kept in deep sleep)
 RTC_DATA_ATTR float rtcRestVolt = 0;  // battery voltage while off, followed slowly (it relaxes upwards)
 RTC_DATA_ATTR bool rtcUsbWas = false;  // computer on USB when it went off / at the last look
 RTC_DATA_ATTR uint32_t rtcOffChecks = 0;
@@ -2258,6 +2259,18 @@ bool battSettling() {
   return activity == ACT_ASLEEP || activity == ACT_HIDING || since(battWokeAt) < minutes(10);
 }
 
+void battSetCal(float cal, const char *why) {
+  float ratio = cal / battCal;
+  battCal = cal;
+  battV *= ratio; battVSlow *= ratio;  // rescale what we already measured
+  for (auto &h : battSecHist) h *= ratio;
+  for (auto &h : battMinHist) h *= ratio;
+  prefs.begin("kitbit-batt", false);
+  prefs.putFloat("cal", battCal);
+  prefs.end();
+  Serial.printf("[batt] calibrated (%s): correction x%.3f, now %.3f V\n", why, battCal, battV);
+}
+
 bool battOnBattery() { return battState == BATT_OK || battState == BATT_LOW || battState == BATT_CRITICAL; }
 
 static const float LIPO_V[] = {3.30f, 3.50f, 3.64f, 3.68f, 3.71f, 3.75f, 3.80f, 3.85f, 3.92f, 4.00f, 4.10f, 4.20f};
@@ -2274,7 +2287,7 @@ float battReadVolts() {
 #if ENABLE_BATTERY
   uint32_t mv = 0;
   for (int i = 0; i < 64; i++) mv += analogReadMilliVolts(PIN_BATTERY);  // average out ADC noise
-  return mv / 64000.0f * BATT_DIVIDER * BATT_CAL;
+  return mv / 64000.0f * BATT_DIVIDER * BATT_CAL * battCal;
 #else
   return 0;
 #endif
@@ -2456,11 +2469,21 @@ void battMeasure() {
     else { battUnplugAt = now; battVSlow = battV; }
   }
 
+  // Self-calibration: charging, and the voltage hasn't moved for 10 min -> the charger
+  // is holding the cell at exactly BATT_CV_V. (The ADC + 5 % resistors read a few % off.)
+  if (charging && since(battChargeStart) > minutes(15) && battMinCount >= 21 && fabsf(rise10) < 0.005f) {
+    float cal = clampf(battCal * BATT_CV_V / battV, 0.90f, 1.10f);
+    if (fabsf(cal / battCal - 1.0f) > 0.005f) battSetCal(cal, "charging plateau");
+  }
   if (!charging) battFull = false;
   else if (!battFull && battV >= BATT_FULL_V && rise10 < 0.01f) battFull = true;  // stopped rising
 
   if (battFull) battPctEst = 100;
-  else if (!charging) {
+  else if (charging) {
+    // Charging pushes the voltage up ~0.1 V: estimate from below, and only ever count up.
+    float p = min(99.0f, lipoPercent(battVSlow - 0.10f));
+    if (p > battPctEst) battPctEst = p;
+  } else {
     float p = lipoPercent(battVSlow);
     // On battery the number only goes down (no bouncing), except while the voltage settles after unplugging.
     if (since(battUnplugAt) < 90000 || p < battPctEst) battPctEst = p;
@@ -2481,6 +2504,13 @@ void battBegin() {
   float v = battReadVolts();
   if (v < 2.5f) { Serial.printf("[batt] reads %.2f V - no battery? battery features off\n", v); return; }
   battPresent = true;
+  prefs.begin("kitbit-batt", true);
+  battCal = prefs.getFloat("cal", 1.0f);
+  prefs.end();
+  if (fabsf(battCal - 1.0f) > 0.001f) {
+    Serial.printf("[batt] learned correction x%.3f\n", battCal);
+    v = battReadVolts();
+  }
   battV = battVSlow = v;
   for (auto &h : battSecHist) h = v;
   // Don't trust the USB flag or a high voltage right at boot (both misled it when the
@@ -2771,6 +2801,12 @@ void runCommand(String cmd) {
   else if (cmd.startsWith("sound ")) { int id = cmd.substring(6).toInt(); xQueueSend(soundQueue, &id, 0); }
   else if (cmd == "reset") { happiness = 70; energy = 90; saveMemory(); }
   else if (cmd == "batt" || cmd == "battery") printBattery();
+  else if (cmd.startsWith("battcal ")) {  // battcal <volts measured with a multimeter at BAT+>
+    float real = cmd.substring(8).toFloat();
+    if (real > 2.5f && real < 4.4f && battV > 2.5f) battSetCal(clampf(battCal * real / battV, 0.85f, 1.15f), "multimeter");
+    else if (cmd.substring(8) == "reset") battSetCal(1.0f, "reset");
+    else Serial.println(F("usage: battcal <volts>  or  battcal reset"));
+  }
   else if (cmd == "off") powerOff(OFF_USER, true);
   else if (cmd.startsWith("fakebatt ")) {
     String a = cmd.substring(9);
