@@ -920,6 +920,7 @@ void imuFifoReset() {
 const uint8_t HIT_PENDING = 0, HIT_TAP = 1, HIT_SLAM = 2;
 uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickVerdict[8] = {0};  uint8_t kickIdx = 0;
 bool slamPending = false;
+uint32_t slamAt = 0;
 // Plain jolt log for the face-down "switch off" double tap: face down on the desk every
 // tap rings like a slam, so the normal tap logic (mic click + non-ringing jolt) can't be used.
 uint32_t joltLog[4];  volatile uint32_t joltLogCount = 0;
@@ -1010,7 +1011,7 @@ float imuFifoPeak(float dir[3]) {
         hitOpen = false;
         bool slam = hitRings && hitPeak > SLAM_MIN_G && onSurface;  // in a hand there's no desk to slam
         kickVerdict[hitSlot] = slam ? HIT_SLAM : HIT_TAP;
-        if (slam && !soundPlaying) slamPending = true;
+        if (slam && !soundPlaying) { slamPending = true; slamAt = hitStart; }
         if (tapDebug) Serial.printf("H,%lu,%s,%.2f\n", (unsigned long)hitStart, slam ? "slam" : "tap", hitPeak);
       }
       if (tapDebug && m > TAP_CONFIRM_G && t - lastKickAt > 30) {
@@ -1178,9 +1179,18 @@ void imuStep() {
   if (!fifoOk && tapG > TAP_CONFIRM_G) {  // no FIFO: best effort with the step time
     kickMs[kickIdx] = now; kickSide[kickIdx] = dyn.x; kickVerdict[kickIdx] = HIT_TAP; kickIdx = (kickIdx + 1) % 8;
   }
-  if (slamPending) {  // the desk rang: someone slammed it
+  if (slamPending) {  // the desk rang: someone slammed it?
     slamPending = false;
-    if (!falling && !shaking) {
+    // A real slam is loud: the mic must have heard a bang right then (nudging the desk,
+    // putting a mug down or heavy typing mostly isn't). And no startle spam.
+    bool bang = !(SLAM_NEEDS_BANG && micOk);
+    for (int i = 0; i < 8 && !bang; i++)
+      if (micClickCount > (uint32_t)i && (uint32_t)abs((int32_t)(micClickTimes[(micClickCount - 1 - i) % 8] - slamAt)) <= 200) bang = true;
+    static uint32_t lastSlam = 0;
+    bool cooled = !lastSlam || now - lastSlam > SLAM_COOLDOWN_MS;
+    if (tapDebug && (!bang || !cooled)) Serial.printf("E,%lu,bump_ignored_%s\n", (unsigned long)now, bang ? "cooldown" : "quiet");
+    if (bang && cooled && !falling && !shaking) {
+      lastSlam = now;
       ev.bump = true;
       tapCount = 0;
       if (tapDebug) Serial.printf("E,%lu,bump\n", (unsigned long)now);

@@ -82,10 +82,12 @@
 // Tap or desk slam? Measured: after a slam the desk keeps the pet shaking for ~70-85 ms,
 // after a finger tap the jolt is gone at once. So a jolt that is still above SLAM_RING_G
 // SLAM_RING_FROM_MS after it started (checked until SLAM_RING_TO_MS) was a slam.
-#define SLAM_RING_G        0.06f
+#define SLAM_RING_G        0.10f
 #define SLAM_RING_FROM_MS  45
 #define SLAM_RING_TO_MS    130
-#define SLAM_MIN_G         0.20f   // and it has to be at least this big
+#define SLAM_MIN_G         0.45f   // and it has to be at least this big (mugs, nudges, heavy typing stay below)
+#define SLAM_NEEDS_BANG    1       // ...and the mic must hear a bang within 200 ms (if the mic works)
+#define SLAM_COOLDOWN_MS   8000    // at most one startle this often
 // Slams only exist when it stands on something solid. Measured: a still hand is as quiet
 // as a desk for this sensor, so "on a surface" = standing upright in its calibrated pose
 // (a hand practically never holds it that exactly) and not rotating.
