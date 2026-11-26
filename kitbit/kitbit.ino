@@ -1716,6 +1716,7 @@ float battSecHist[8];  uint8_t battSecIdx = 0, battSecCount = 0;    // last 8 s
 float battMinHist[21]; uint8_t battMinIdx = 0, battMinCount = 0;    // every 30 s, 10 min
 uint32_t battLastMinPush = 0;
 bool battCharging = false, battFull = false, battUsb = false;
+const char *battWhy = "boot";  // why it thinks it is / isn't charging (shown by "batt")
 uint32_t battChargeStart = 0, battUnplugAt = 0, battNextNag = 0, battNextNom = 0;
 uint8_t battEmptyCount = 0;
 bool battFake = false;   // serial "fakebatt" for trying the reactions
@@ -1882,18 +1883,24 @@ void battMeasure() {
   float trend5 = battMinCount > 10 ? battV - minAgo(10) : 0;   // over 5 min
   float rise10 = battMinCount >= 21 ? battV - minAgo(20) : 1;  // over 10 min
 
-  bool usb = battUsbSense();
+  // The USB "connected" flag needs a few seconds after boot to become reliable.
+  bool usb = millis() > 5000 && battUsbSense();
   bool charging = battCharging;
+  const char *why = battWhy;
 #if PIN_USB_SENSE >= 0
-  charging = usb;
+  charging = usb; why = usb ? "5V sense pin high" : "5V sense pin low";
 #else
-  if (usb) charging = true;
-  else if (battUsb) charging = false;  // unplugged from the computer
-  else if (!charging && (jump > 0.06f || (trend5 > 0.03f && since(battUnplugAt) > minutes(6)))) charging = true;
-  else if (charging && (jump < (battFull ? -0.03f : -0.06f) ||  // a full cell only drops a little
-                        (trend5 < -0.02f && since(battChargeStart) > minutes(6)))) charging = false;
+  if (usb) { charging = true; why = "USB computer connected"; }
+  else if (battUsb) { charging = false; why = "USB computer disconnected"; }
+  else if (!charging && jump > 0.06f) { charging = true; why = "voltage jumped up"; }
+  else if (!charging && trend5 > 0.03f && since(battUnplugAt) > minutes(6)) { charging = true; why = "voltage rising for 5 min"; }
+  else if (charging && jump < (battFull ? -0.03f : -0.06f)) { charging = false; why = "voltage dropped"; }  // a full cell only drops a little
+  else if (charging && trend5 < -0.01f && since(battChargeStart) > minutes(3)) { charging = false; why = "voltage falling"; }
 #endif
   battUsb = usb;
+  if (charging != battCharging) Serial.printf("[batt] %s: %s (%.3f V, jump %+.3f, 5-min trend %+.3f)\n",
+                                              charging ? "charging" : "not charging", why, battV, jump, trend5);
+  battWhy = why;
 
   if (charging != battCharging) {
     battCharging = charging;
@@ -1930,8 +1937,12 @@ void battBegin() {
   battPresent = true;
   battV = battVSlow = v;
   for (auto &h : battSecHist) h = v;
-  battUsb = battUsbSense();
-  battCharging = battUsb || v > 4.22f || wokeFrom == OFF_BATTERY;  // woke up from empty = a charger was plugged in
+  // Don't trust the USB flag or a high voltage right at boot (both misled it when the
+  // battery was connected first). Start as "on battery"; USB / voltage changes decide
+  // within seconds. Exception: waking up from the empty-battery sleep = charger plugged in.
+  battUsb = false;
+  battCharging = (wokeFrom == OFF_BATTERY);
+  battWhy = battCharging ? "woke up from empty: charger plugged in" : "boot: assuming on battery";
   uint32_t now = millis();
   battChargeStart = battUnplugAt = battLastMinPush = now;
   battPctEst = lipoPercent(v);
@@ -2039,8 +2050,8 @@ void offModeCheck() {
 
 void printBattery() {
   if (!battPresent && !battFake) { Serial.println(F("battery: not measured (no divider on PIN_BATTERY)")); return; }
-  Serial.printf("battery: %s %d%%  %.3f V (slow %.3f)  usb=%d%s\n", BATT_NAMES[battState], battPct, battV, battVSlow,
-                battUsb, battFake ? "  [fake]" : "");
+  Serial.printf("battery: %s %d%%  %.3f V (slow %.3f)  usb=%d (raw %d)  why: %s%s\n", BATT_NAMES[battState], battPct,
+                battV, battVSlow, battUsb, battUsbSense(), battWhy, battFake ? "  [fake]" : "");
 }
 
 // =====================================================================
