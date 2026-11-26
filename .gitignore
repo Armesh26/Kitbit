@@ -6,3 +6,4 @@ build/
 .DS_Store
 tools/tap_logs/
 __pycache__/
+tools/audio/

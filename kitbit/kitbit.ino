@@ -580,6 +580,7 @@ volatile float micPeakWin = 0;              // loudest chunk in the current 100 
 bool scratching = false;  uint32_t scratchStartMs = 0, scratchEndMs = 0;
 bool micStream = false;
 bool tapDebug = false;  // "tapdebug": raw tap data at 100 Hz for tools/tap_test.py
+volatile uint32_t audioDumpUntil = 0;  // "audiodump <s>": raw mic audio over USB for tools/audio_dump.py
 
 #if ENABLE_MIC
 void micTask(void *) {
@@ -614,6 +615,23 @@ void micTask(void *) {
         if (!micOk) { i2s.end(); vTaskDelete(NULL); }
       }
       continue;
+    }
+    if (audioDumpUntil) {  // frames: "AUD!" + uint16 count + count x 24-bit little-endian samples
+      if ((int32_t)(now - audioDumpUntil) >= 0) {
+        audioDumpUntil = 0;
+      } else {
+        static uint8_t frame[6 + 128 * 3];
+        memcpy(frame, "AUD!", 4);
+        frame[4] = n & 0xFF;
+        frame[5] = n >> 8;
+        for (size_t i = 0; i < n; i++) {
+          int32_t v = buf[i] >> 8;
+          frame[6 + i * 3] = v;
+          frame[7 + i * 3] = v >> 8;
+          frame[8 + i * 3] = v >> 16;
+        }
+        Serial.write(frame, 6 + n * 3);  // one write: other tasks' prints can't land inside a frame
+      }
     }
     if (soundPlaying) lastSound = now;
     bool speakerQuiet = now - lastSound > 150;  // never hear our own buzzer as a tap
@@ -2765,6 +2783,17 @@ void runCommand(String cmd) {
   if (cmd == "help") printHelp();
   else if (cmd == "status") printStatus();
   else if (cmd == "imu") { imuStream = !imuStream; }
+  else if (cmd.startsWith("note ")) {  // note <hz> <ms>: tools/melody.py --play
+    int sp = cmd.indexOf(' ', 5);
+    int hz = cmd.substring(5, sp).toInt(), ms = sp > 0 ? cmd.substring(sp + 1).toInt() : 200;
+    if (hz >= 50 && hz <= 8000) tone(PIN_BUZZER, hz, constrain(ms, 10, 3000));
+  }
+  else if (cmd.startsWith("audiodump ")) {
+    int sec = constrain(cmd.substring(10).toInt(), 1, 120);
+    Serial.printf("I,audiodump,%d\n", sec);
+    Serial.flush();
+    audioDumpUntil = millis() + sec * 1000UL;
+  }
   else if (cmd == "offtest") { offTest = !offTest; Serial.printf("I,offtest,%d\n", offTest); }
   else if (cmd == "tapdebug") { tapDebug = !tapDebug; Serial.printf("I,tapdebug,%d,mic,%d\n", tapDebug, micOk); }
   else if (cmd.startsWith("prompt")) {  // prompt <line1>|<line2>  (empty = clear)
