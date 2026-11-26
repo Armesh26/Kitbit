@@ -58,6 +58,12 @@ Then set `#define PIN_USB_SENSE D6` in `config.h`. Charging then comes straight 
 
 First check that the 5V pin reads about 0 V when the board runs on battery alone. If the battery back-feeds that pin, the sense divider won't work.
 
+## Motion sensing
+
+- **Taps are read from the sensor's FIFO.** It samples the accelerometer at 500 Hz with about a 184 Hz filter. `imuFifoPeak()` returns the biggest deviation from gravity since the last step, which is compared against `TAP_G` and `BUMP_G`. At the old 100 Hz / 44 Hz settings, taps were smoothed away.
+- **If the FIFO never delivers data, taps fall back to plain samples.** A message is printed when this happens.
+- **Shaking was too sensitive before.** It now needs movement above `SHAKE_G`, and dizziness builds up more slowly. If you lower these thresholds again, test them on the hardware.
+
 ## Power
 
 - **"Off"** is deep sleep. It is entered with the serial command `off`, or automatically after `AUTO_OFF_FACEDOWN_MIN` face down on battery. It wakes when moved more than 30°, when a charger raises the voltage, or when RESET is pressed.

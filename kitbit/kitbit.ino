@@ -579,6 +579,10 @@ bool shaking = false;   float shakeMeter = 0;  uint32_t shakeStartMs = 0;
 float dizzy = 0;
 bool falling = false;   uint8_t lowGCount = 0, normalCount = 0;  uint32_t fallStartMs = 0;
 uint8_t tapCount = 0;   float tapSide = 0;  uint32_t lastTapMs = 0, lastTapCandMs = 0;
+// The sensor fills its FIFO at 500 Hz; every step we look at all new samples for the biggest kick.
+bool fifoOk = true;  uint16_t fifoEmptySteps = 0;
+float fifoGrav[3] = {0, 0, 1};  bool fifoGravInit = false;  // sensor-frame gravity, tracked at 500 Hz
+float tapPeak = 0;  // biggest kick since the last "imu" line
 uint32_t deskActiveUntil = 0;
 Orient orient = OR_UPRIGHT, prevOrient = OR_UPRIGHT, orientCand = OR_UPRIGHT;
 uint32_t orientCandSince = 0;
@@ -696,11 +700,12 @@ bool imuBegin() {
   delay(100);
   imuWrite(0x6B, 0x01);  // wake up, clock from gyro PLL
   delay(50);
-  imuWrite(0x19, 0x09);  // SMPLRT_DIV: 1 kHz / (1+9) = 100 Hz
-  imuWrite(0x1A, 0x03);  // CONFIG: DLPF ~44 Hz
+  imuWrite(0x19, 0x01);  // SMPLRT_DIV: 1 kHz / (1+1) = 500 Hz (into the FIFO)
+  imuWrite(0x1A, 0x01);  // CONFIG: DLPF ~184 Hz, keeps the sharp spike of a tap
   imuWrite(0x1B, 0x08);  // GYRO_CONFIG: +-500 dps
   imuWrite(0x1C, 0x08);  // ACCEL_CONFIG: +-4 g
-  if (imuWho != 0x68) imuWrite(0x1D, 0x03);  // ACCEL_CONFIG2 (6500 family): accel DLPF ~44 Hz
+  if (imuWho != 0x68) imuWrite(0x1D, 0x01);  // ACCEL_CONFIG2 (6500 family): accel DLPF ~218 Hz
+  imuFifoReset();
   delay(20);
 
   // Sanity check: a living sensor sees ~1 g of gravity.
@@ -748,11 +753,54 @@ void imuMeasureGyroBias() {
   }
 }
 
+void imuFifoReset() {
+  imuWrite(0x6A, 0x00);  // USER_CTRL: FIFO off
+  imuWrite(0x23, 0x08);  // FIFO_EN: accelerometer only
+  imuWrite(0x6A, 0x04);  // reset FIFO
+  delay(1);
+  imuWrite(0x6A, 0x40);  // FIFO on
+}
+
+// Biggest kick away from gravity among the new FIFO samples (g), and its direction
+// in the sensor frame. Returns -1 if nothing was read.
+float imuFifoPeak(float dir[3]) {
+  uint8_t c[2];
+  if (!imuRead(0x72, c, 2)) return -1;
+  uint16_t count = (uint16_t)(c[0] << 8 | c[1]);
+  if (count == 0) return -1;
+  if (count >= 900 || count % 6) { imuFifoReset(); return -1; }  // overflow / out of step
+  uint8_t n = min<uint16_t>(count / 6, 20);  // 20 samples = 120 bytes, fits the I2C buffer
+  uint8_t b[120];
+  if (!imuRead(0x74, b, n * 6)) return -1;
+  float peak = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    float s[3];
+    for (int k = 0; k < 3; k++) s[k] = (int16_t)(b[i * 6 + k * 2] << 8 | b[i * 6 + k * 2 + 1]) / 8192.0f;
+    if (!fifoGravInit) { memcpy(fifoGrav, s, sizeof s); fifoGravInit = true; }
+    float d[3], m = 0;
+    for (int k = 0; k < 3; k++) { d[k] = s[k] - fifoGrav[k]; m += d[k] * d[k]; fifoGrav[k] += d[k] * 0.01f; }
+    m = sqrtf(m);
+    if (m > peak) { peak = m; memcpy(dir, d, sizeof d); }
+  }
+  return peak;
+}
+
 void imuStep() {
   float sa[3], sg[3];
   {
     BusLock lock;
     if (!imuSample(sa, sg)) return;
+  }
+  float kickDir[3] = {0, 0, 0};
+  float kick = -1;
+  if (fifoOk) {
+    BusLock lock;
+    kick = imuFifoPeak(kickDir);
+    if (kick < 0 && ++fifoEmptySteps > 200) {  // FIFO never delivers on this chip: fall back
+      fifoOk = false;
+      Serial.println(F("[imu] FIFO not working - taps use plain samples (less sensitive)"));
+    }
+    if (kick >= 0) fifoEmptySteps = 0;
   }
   uint32_t now = millis();
   float dt = clampf((now - lastImuMs) / 1000.0f, 0.001f, 0.1f);
@@ -782,7 +830,7 @@ void imuStep() {
   gyroMag = gyr.len();
 
   // Gyro zero-offset drifts with temperature: keep trimming it while sitting still.
-  if (jerk < 0.02f && dynMag < 0.03f && fabsf(accMag - 1.0f) < 0.08f && gyroMag < 8.0f) {
+  if (jerk < 0.04f && dynMag < 0.04f && fabsf(accMag - 1.0f) < 0.08f && gyroMag < 8.0f) {
     for (int i = 0; i < 3; i++) gyroBias[i] += (sg[i]) * 0.002f;
   }
 
@@ -793,14 +841,14 @@ void imuStep() {
   else if (handling && handleScore < 0.08f) { handling = false; ev.putdown = true; }
 
   // --- shaking ---
-  shakeMeter = shakeMeter * 0.95f + (dynMag > 0.6f ? dynMag * 0.12f : 0.0f);
+  shakeMeter = shakeMeter * 0.97f + (dynMag > SHAKE_G ? dynMag * 0.05f : 0.0f);
   if (!shaking && shakeMeter > SHAKE_START) { shaking = true; shakeStartMs = now; ev.shakeStart = true; }
   else if (shaking && shakeMeter < 0.4f) { shaking = false; ev.shakeEnd = true; ev.shakeMs = now - shakeStartMs; }
 
   // --- dizziness builds up from shaking and spinning ---
   float spin = fabsf(gyr.y);
-  if (shaking) dizzy += dt * shakeMeter * 0.6f;
-  if (spin > SPIN_DPS) dizzy += dt * spin / SPIN_DPS;
+  if (shaking) dizzy += dt * shakeMeter * 0.3f;
+  if (spin > SPIN_DPS) dizzy += dt * spin / SPIN_DPS * 0.5f;
   dizzy = clampf(dizzy - dt * 0.15f, 0, 10);
 
   // --- free fall / landing ---
@@ -819,14 +867,16 @@ void imuStep() {
   }
 
   // --- taps and knocks (only while resting) ---
+  float tapG = kick >= 0 ? kick : (fifoOk ? 0 : jerk);
+  if (tapG > tapPeak) tapPeak = tapG;
   if (!handling && !falling && !shaking && now - lastTapCandMs > TAP_DEBOUNCE_MS) {
-    if (jerk > BUMP_JERK_G) {
+    if (tapG > BUMP_G) {
       ev.bump = true;
       lastTapCandMs = now;
       tapCount = 0;
-    } else if (jerk > TAP_JERK_G) {
+    } else if (tapG > TAP_G) {
       tapCount++;
-      tapSide += dyn.x;
+      tapSide += kick >= 0 ? toBody(kickDir).x : dyn.x;
       lastTapMs = lastTapCandMs = now;
     }
   }
@@ -1199,7 +1249,7 @@ void handleMotionEvents() {
     say(S_OHOOH, 1, true);
   }
   if (e.shakeEnd) {
-    if (e.shakeMs > 3000) { grumpyPending = true; addHappiness(-12); }
+    if (e.shakeMs > SHAKE_GRUMPY_MS) { grumpyPending = true; addHappiness(-12); }
     else if (dizzy < DIZZY_SHOW) {  // a little shake is fun
       react(faceWith(HAPPY), 1500);
       say(SND_GIGGLE);
@@ -1394,7 +1444,7 @@ void effectsStep() {
   if (shaking && activity == ACT_AWAKE) {
     Face f; f.hFlicker = 3; f.vFlicker = 2;
     react(f, 300);
-    if (overlay != OV_DIZZY) showOverlay(OV_DIZZY, 600);
+    if (dizzy > DIZZY_SHOW * 0.5f && overlay != OV_DIZZY) showOverlay(OV_DIZZY, 600);  // stars once it's getting dizzy
   }
 
   // Dizzy after shaking / spinning.
@@ -1664,7 +1714,7 @@ void calibrationStep() {
 
   // Average only while held perfectly still; any movement restarts the average.
   float m = sqrtf(rawAcc[0] * rawAcc[0] + rawAcc[1] * rawAcc[1] + rawAcc[2] * rawAcc[2]);
-  if (jerk > 0.02f || fabsf(m - 1.0f) > 0.12f) { calResetAverage(); return; }
+  if (jerk > 0.05f || fabsf(m - 1.0f) > 0.12f) { calResetAverage(); return; }
 
   if (calStage == 2) {  // must really have been turned onto its back first
     float d = (rawAcc[0] * calUp[0] + rawAcc[1] * calUp[1] + rawAcc[2] * calUp[2]) / m;
@@ -2161,9 +2211,10 @@ void serialStep() {
   static uint32_t lastPrint = 0;
   if (imuStream && imuOk && since(lastPrint) > 100) {
     lastPrint = millis();
-    Serial.printf("right=%+.2f up=%+.2f out=%+.2f |g|=%.2f gyro=%5.0f jerk=%.3f vib=%.4f floor=%.4f desk=%d hold=%d shake=%.1f dizzy=%.1f %s\n",
-                  grav.x, grav.y, grav.z, accMag, gyroMag, jerk, vib, vibFloor, present(), handling, shakeMeter, dizzy,
+    Serial.printf("right=%+.2f up=%+.2f out=%+.2f |g|=%.2f gyro=%5.0f tap=%.2f jerk=%.3f vib=%.4f floor=%.4f desk=%d hold=%d shake=%.1f dizzy=%.1f %s\n",
+                  grav.x, grav.y, grav.z, accMag, gyroMag, tapPeak, jerk, vib, vibFloor, present(), handling, shakeMeter, dizzy,
                   ORIENT_NAMES[orient]);
+    tapPeak = 0;  // peak kick since the last line
   }
 }
 

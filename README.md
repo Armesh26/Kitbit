@@ -41,6 +41,14 @@ This measures the exact mounting, at any angle, plus the gyro's zero-offset, and
 
 To check it worked, type `imu`. Upright should show `up` at about `+1.00`, and tilting the pet to its right should make `right` go negative.
 
+### Tune taps and shaking
+
+Type `imu` and tap the pet. `tap=` shows the strongest kick since the previous line.
+- **Taps get missed:** lower `TAP_G`. The default is 0.20.
+- **It reacts to the desk being bumped:** raise `TAP_G`.
+
+Shaking only counts above `SHAKE_G` (1 g), and it takes about 3–4 s of hard shaking to get dizzy (`DIZZY_SHOW`).
+
 ### Tune desk-activity detection
 
 Type `imu` and watch `desk=` while you type on your keyboard. If it never shows `1`, lower `DESK_MARGIN_G`. If it's always `1`, raise it.

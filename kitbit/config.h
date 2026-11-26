@@ -55,14 +55,18 @@
 #define IMU_OUT_SIGN       (-1)
 
 // ---------------- Motion thresholds (in g / deg per second) ----------
-#define TAP_JERK_G         0.30f   // sample-to-sample jump that counts as a tap/knock
-#define BUMP_JERK_G        1.60f   // anything harder is a startling bump / desk slam
+// Taps are measured from the sensor's own 500 Hz buffer: the peak kick (g) away from gravity.
+// Watch "tap=" in the "imu" stream while tapping to tune these.
+#define TAP_G              0.20f   // a kick bigger than this counts as a tap / knock
+#define BUMP_G             1.50f   // anything harder is a startling bump / desk slam
 #define TAP_DEBOUNCE_MS    120
 #define TAP_WINDOW_MS      450     // taps closer than this are grouped (double / triple tap)
 #define HANDLE_GYRO_DPS    25.0f   // rotation that means "someone is holding me"
-#define SHAKE_START        1.5f    // shake meter level to start "being shaken"
-#define SPIN_DPS           220.0f  // spinning around the vertical axis
-#define DIZZY_SHOW         1.6f    // dizziness level that makes the eyes go swirly
+#define SHAKE_G            1.0f    // movement (g) that counts towards shaking; gentle handling stays below
+#define SHAKE_START        1.5f    // shake meter level to start "being shaken" (~0.6 s of real shaking)
+#define SHAKE_GRUMPY_MS    6000    // shaken longer than this -> grumpy
+#define SPIN_DPS           300.0f  // spinning around the vertical axis
+#define DIZZY_SHOW         2.5f    // dizziness that makes the eyes go swirly (~3-4 s of hard shaking)
 #define FREEFALL_G         0.35f
 #define LAND_G             2.0f
 #define ORIENT_SETTLE_MS   600     // how long a new orientation must hold
