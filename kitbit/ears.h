@@ -118,6 +118,7 @@ class Ears {
   bool frameDirty = false;
   uint32_t frameTimes[ON];
   uint16_t musicHist = 0;
+  int quietSecs = 0;
   // hum autocorrelation (4 kHz)
   int16_t acBuf[256];
   int acPos = 0, acFill = 0, acHop = 0;
@@ -323,7 +324,7 @@ class Ears {
     secHeld = 0;
     singHist = ((singHist << 1) | (st.sung > SUNG_MIN)) & 0x7;  // last 3 seconds
     if (!st.singing && __builtin_popcount(singHist) >= 2) st.singing = true;
-    else if (st.singing && __builtin_popcount(singHist) == 0) st.singing = false;
+    else if (st.singing && (singHist & 0x3) == 0) st.singing = false;  // 2 s without held notes
     secLoud = secTonal = secSteady = 0;
     secLoudN = secSound = secTonalN = secSteadyN = 0;
     if (onFill < ON) return;
@@ -379,9 +380,11 @@ class Ears {
 
   void decide(bool musical) {
     musicHist = ((musicHist << 1) | musical) & 0xFF;  // last 8 seconds
-    int n = __builtin_popcount(musicHist);
+    int n = __builtin_popcount(musicHist), recent = __builtin_popcount(musicHist & 0xF);
+    // Quiet for 2 s: the music has stopped, no need to wait for the slow evidence.
+    quietSecs = (st.loudAvg < MUSIC_MIN_DB * 0.6f || st.continuity < 0.5f) ? quietSecs + 1 : 0;
     if (!st.music && n >= 5) st.music = true;
-    else if (st.music && n <= 2) st.music = false;
+    else if (st.music && (recent <= 1 || quietSecs >= 2)) { st.music = false; musicHist = 0; }
   }
 
   // Voice pitch (singing / humming): autocorrelation at 4 kHz, ~80-800 Hz.
