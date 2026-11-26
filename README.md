@@ -6,8 +6,8 @@ KitBit is a desk pet for the Seeed XIAO ESP32C3. It has animated robot eyes on a
 
 | Part | XIAO ESP32C3 pin |
 |---|---|
-| 1.3" SH1106 128x64 OLED (I2C, 0x3C); for a 0.96" SSD1306 set `OLED_SH1106 0` | SDA D4, SCL D5 |
-| MPU6050 or clone (I2C, 0x68 or 0x69) | SDA D4, SCL D5 (same bus) |
+| 1.3" SH1106 128x64 OLED (I2C, 0x3C); for a 0.96" SSD1306 set `OLED_SH1106 0` | SDA D7, SCL D5 |
+| MPU6050 or clone (I2C, 0x68 or 0x69) | SDA D7, SCL D5 (same bus) |
 | Passive buzzer | D1 |
 
 Other ESP32 boards work too: change the pins in [kitbit/config.h](kitbit/config.h). On a classic ESP32 / S2 / S3 you can also add a touch pad (a wire or copper tape on the pet's head) with `ENABLE_TOUCH 1`. The C3 has no touch hardware.

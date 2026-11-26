@@ -4,8 +4,8 @@
 //  serial monitor (115200) and on the OLED.
 //
 //  Board: Seeed XIAO ESP32C3
-//    OLED SH1106 1.3"  -> SDA D4, SCL D5 (0x3C)
-//    MPU6050 / clone   -> SDA D4, SCL D5 (0x68 / 0x69)
+//    OLED SH1106 1.3"  -> SDA D7, SCL D5 (0x3C)
+//    MPU6050 / clone   -> SDA D7, SCL D5 (0x68 / 0x69)
 //    Passive buzzer    -> D1
 //    INMP441 mic       -> SCK D2, WS D3, SD D10, L/R GND, VDD 3V3
 //
@@ -18,7 +18,7 @@
 #include <ESP_I2S.h>
 
 // ---------------- pins ----------------
-#define PIN_SDA     D4
+#define PIN_SDA     D7      // moved from D4 (GPIO6 shorted to GND)
 #define PIN_SCL     D5
 #define PIN_BUZZER  D1
 #define PIN_MIC_SCK D2
@@ -102,7 +102,7 @@ void report(int idx, Result r, const char *detail) {
 
 // ---------------- 1. I2C bus ----------------
 void testI2C() {
-  Serial.println("[1/5] I2C bus scan (SDA D4, SCL D5)");
+  Serial.println("[1/5] I2C bus scan (SDA D7, SCL D5)");
   int found = 0;
   bool sawOled = false, sawImu = false;
   for (uint8_t a = 1; a < 127; a++) {

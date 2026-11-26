@@ -5,7 +5,7 @@
 #pragma once
 
 // ---------------- Pins (Seeed XIAO ESP32C3) ---------------------------
-#define PIN_SDA            D4      // GPIO6
+#define PIN_SDA            D7      // GPIO20 (RX pin). Moved from D4: GPIO6 is shorted to GND on this board
 #define PIN_SCL            D5      // GPIO7
 #define PIN_BUZZER         D1      // GPIO3, passive buzzer (CuteBuzzerSounds)
 
