@@ -1603,8 +1603,10 @@ bool repeatBusy() {
 #endif
 }
 
+bool beatClear() { return ears.st.beatAvg >= SING_MIN_BEAT; }
+
 void onBeat(uint32_t n, uint32_t period) {
-  glance((n % 2) ? 0.7f : -0.7f, -0.1f, period);  // sway left / right
+  glance((n % 2) ? 0.7f : -0.7f, -0.1f, period);  // sway left / right on the beat
   react(faceWith(HAPPY), period + 200);
   if (n % 4 == 0 && !hopRestoreAt) {  // a little hop on the first beat of the bar
     BusLock lock;
@@ -1614,14 +1616,15 @@ void onBeat(uint32_t n, uint32_t period) {
   }
   if (n % 8 == 0) showOverlay(OV_NOTES, period * 4);
 #if SING_ALONG
-  // Hum along: 2 bars singing, 2 bars listening. Root, fifth, third, fifth of the current
-  // chord, up in the buzzer's sweet spot.
+  // Hum along: one bar of singing, three bars of listening. Only the notes the song itself
+  // played most (so it's always in key), up in the buzzer's sweet spot, walking up and down.
   int bar = (n / 4) % 4, beat = n % 4;
-  if (bar < 2 && ears.st.chord >= 0 && chattiness >= 2 && !muted) {
-    int root = ears.st.chord;
-    int pc = beat == 0 ? root : beat == 2 ? root + (ears.st.chordMinor ? 3 : 4) : root + 7;
-    int midi = SING_BASE_MIDI + ((pc - SING_BASE_MIDI) % 12 + 12) % 12;
-    sayNote(midi, min<uint32_t>(period * 55 / 100, 260), 2);
+  if (bar == 0 && ears.st.songPc[2] >= 0 && chattiness >= 2 && !muted) {
+    int pcs[3], k = 0;
+    for (int i = 0; i < 3; i++) pcs[k++] = ((ears.st.songPc[i] - SING_BASE_MIDI) % 12 + 12) % 12;
+    std::sort(pcs, pcs + 3);  // low to high inside the octave above SING_BASE_MIDI
+    static const uint8_t walk[4] = {0, 1, 2, 1};
+    sayNote(SING_BASE_MIDI + pcs[walk[beat]], min<uint32_t>(period * 55 / 100, 260), 2);
   }
 #endif
 }
@@ -1647,6 +1650,18 @@ void musicStep() {
   }
   if (!dancing) return;
   lastInteraction = now;  // music is company
+  if (!beatClear()) {  // no clear beat: sway smoothly, don't pretend to know the beat
+    static uint32_t nextSway = 0;
+    static bool swayLeft = false;
+    if (reached(nextSway)) {
+      swayLeft = !swayLeft;
+      glance(swayLeft ? -0.6f : 0.6f, -0.1f, 1400);
+      react(faceWith(HAPPY), 1600);
+      if (overlay != OV_NOTES) showOverlay(OV_NOTES, 3000);
+      nextSway = now + 1400;
+    }
+    return;
+  }
   uint32_t period = ears.st.beatMs, last = ears.st.lastBeat;
   if (period < 300 || period > 1100 || (int32_t)(now - last) < 0) return;
   uint32_t beatTime = last + (now - last) / period * period;
@@ -3051,8 +3066,8 @@ void serialStep() {
   if (earsStream && since(lastEarsPrint) > 500) {
     lastEarsPrint = millis();
     static const char *NN[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f tonal=%.2f keyfit=%.2f bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
-                  ears.st.music, ears.st.loudAvg, ears.st.continuity, ears.st.beatStrength, ears.st.tonalAvg, ears.st.keyCorr, ears.st.bpm,
+    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f/%.2f tonal=%.2f keyfit=%.2f bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
+                  ears.st.music, ears.st.loudAvg, ears.st.continuity, ears.st.beatStrength, ears.st.beatAvg, ears.st.tonalAvg, ears.st.keyCorr, ears.st.bpm,
                   ears.st.key >= 0 ? NN[ears.st.key] : "-", ears.st.keyMinor ? "m" : "",
                   ears.st.chord >= 0 ? NN[ears.st.chord] : "-", ears.st.chordMinor ? "m" : "",
                   ears.st.pitch ? (ears.st.pitchKind == 1 ? "whistle " : "hum ") : "-", ears.st.pitch ? ears.st.pitchMidi : 0.0f);

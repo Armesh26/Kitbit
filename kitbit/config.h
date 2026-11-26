@@ -195,7 +195,8 @@
 #define MUSIC_MIN_TONAL    1.6f    // ...some clear notes (chroma max/mean; noise ~1.2)...
 #define MUSIC_MIN_KEY      0.55f   // ...and staying in one key over ~6 s (talking ~0.3)...
 #define MUSIC_MIN_BEAT     0.30f   // ...or a clear beat with a fairly steady key
-#define SING_ALONG         1       // hum chord notes on the beat (chattiness >= 2)
+#define SING_ALONG         1       // hum the song's own notes on the beat (chattiness >= 2)...
+#define SING_MIN_BEAT      0.25f   // ...only when the beat is clear (else it just sways along)
 #define SING_BASE_MIDI     88      // E6: the buzzer sounds best ~1.3-2.7 kHz (it resonates ~2.6/3.6 kHz)
 #define REPEAT_AFTER_ME    1       // whistle / hum a short tune and it plays it back
 #define REPEAT_START_MS    400     // a steady pitch this long starts listening

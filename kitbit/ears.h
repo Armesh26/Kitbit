@@ -20,7 +20,9 @@ struct EarsState {          // read by the pet (written by the mic task)
   float loudAvg = 0;        // ... averaged over the last second
   float continuity = 0;     // share of the last second that wasn't quiet (music ~1, talking has pauses)
   float tonalAvg = 0;       // tonality averaged over the last second
-  float keyCorr = 0;        // how well the last ~2 s fit one key (0..1): music stays in a key
+  float keyCorr = 0;        // how well the last ~6 s fit one key (0..1): music stays in a key
+  float beatAvg = 0;        // beat strength averaged over ~4 s: is the beat clear enough to sing on?
+  int8_t songPc[3] = {-1, -1, -1};  // the 3 notes (pitch classes) the song played most over ~6 s
   int8_t key = -1;          // 0 = C .. 11 = B
   bool keyMinor = false;
   int8_t chord = -1;        // root of the current chord
@@ -51,6 +53,7 @@ class Ears {
     acFill = 0;
     musicHist = 0;
     st.music = false;
+    st.beatAvg = 0;
     st.pitch = false;
   }
 
@@ -85,6 +88,7 @@ class Ears {
   bool dirty = false, blockDirty = false;
   float chromaLong[12] = {0}, chromaShort[12] = {0};
   float chromaKey[12] = {0};  // ~6 s: music keeps its key, talking averages out to "no key"
+  int keyChallenge = 0;
   // onsets
   float onset[ON];
   int onN = 0, onFill = 0, framesSinceTempo = 0;
@@ -210,7 +214,8 @@ class Ears {
   void findKey() {
     static const float MAJ[12] = {6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88};
     static const float MIN[12] = {6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17};
-    float best = -2;
+    float best = -2, cur = -2;
+    int bestR = 0, bestM = 0;
     for (int r = 0; r < 12; r++)
       for (int m = 0; m < 2; m++) {
         const float *p = m ? MIN : MAJ;
@@ -223,9 +228,27 @@ class Ears {
           num += a * b; dp += a * a; dc += b * b;
         }
         float corr = num / sqrtf(dp * dc + 1e-12f);
-        if (corr > best) { best = corr; st.key = r; st.keyMinor = m; }
+        if (corr > best) { best = corr; bestR = r; bestM = m; }
+        if (r == st.key && m == (int)st.keyMinor) cur = corr;
       }
+    // Only change key when another one is clearly better for ~3 s (no flip-flopping
+    // between neighbours like D major / F# minor).
+    if (st.key < 0) { st.key = bestR; st.keyMinor = bestM; }
+    else if (bestR != st.key || bestM != (int)st.keyMinor) {
+      if (best > cur + 0.04f) { if (++keyChallenge >= 24) { st.key = bestR; st.keyMinor = bestM; keyChallenge = 0; } }
+      else keyChallenge = 0;
+    } else keyChallenge = 0;
     st.keyCorr = max(0.0f, best);
+    // the song's own strongest notes
+    int8_t top[3] = {-1, -1, -1};
+    for (int t = 0; t < 3; t++) {
+      float bv = -1;
+      for (int k = 0; k < 12; k++) {
+        if (k == top[0] || k == top[1]) continue;
+        if (chromaKey[k] > bv) { bv = chromaKey[k]; top[t] = k; }
+      }
+    }
+    for (int t = 0; t < 3; t++) st.songPc[t] = top[t];
   }
 
   void findChord() {
@@ -306,6 +329,7 @@ class Ears {
       if (d < 0) Lf += 0.5f * (a - c) / d;
     }
     st.beatStrength = max(0.0f, ac[bestL]);
+    st.beatAvg += (st.beatStrength - st.beatAvg) * 0.25f;
     st.bpm = 3750.0f / Lf;
     st.beatMs = (uint32_t)(Lf * 16.0f);
     // phase: which offset collects the most onset energy on a comb
