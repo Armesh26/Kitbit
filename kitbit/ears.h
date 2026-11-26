@@ -16,7 +16,11 @@ struct EarsState {          // read by the pet (written by the mic task)
   uint32_t lastBeat = 0;    // millis() of a recent beat
   float beatStrength = 0;   // 0..1, how regular the beat is
   float tonality = 0;       // max/mean of the chroma: clear notes ~2-4, noise ~1.2
-  float loud = 0;           // level above the quiet room, dB
+  float loud = 0;           // level above the quiet room, dB (this 16 ms)
+  float loudAvg = 0;        // ... averaged over the last second
+  float continuity = 0;     // share of the last second that wasn't quiet (music ~1, talking has pauses)
+  float tonalAvg = 0;       // tonality averaged over the last second
+  float keyCorr = 0;        // how well the last ~2 s fit one key (0..1): music stays in a key
   int8_t key = -1;          // 0 = C .. 11 = B
   bool keyMinor = false;
   int8_t chord = -1;        // root of the current chord
@@ -80,12 +84,15 @@ class Ears {
   int32_t dec = 0, decN = 0, gN = 0;
   bool dirty = false, blockDirty = false;
   float chromaLong[12] = {0}, chromaShort[12] = {0};
+  float chromaKey[12] = {0};  // ~6 s: music keeps its key, talking averages out to "no key"
   // onsets
   float onset[ON];
   int onN = 0, onFill = 0, framesSinceTempo = 0;
   int64_t frameE = 0;
   int frameN = 0;
   float logEslow = 0, logE = 0, quietLog = 99, onsetMean = 0;
+  float secLoud = 0, secTonal = 0;
+  int secLoudN = 0, secSound = 0, secTonalN = 0;
   bool frameDirty = false;
   uint32_t frameTimes[ON];
   uint16_t musicHist = 0;
@@ -189,10 +196,13 @@ class Ears {
     for (int k = 0; k < 12; k++) {
       c[k] /= sum;
       chromaLong[k] += (c[k] - chromaLong[k]) * 0.08f;  // ~1.6 s
+      chromaKey[k] += (c[k] - chromaKey[k]) * 0.021f;   // ~6 s
       chromaShort[k] += (c[k] - chromaShort[k]) * 0.5f; // ~0.25 s
       mx = max(mx, chromaShort[k]);
     }
     st.tonality = mx * 12.0f;  // max / mean
+    secTonal += st.tonality;
+    secTonalN++;
     findKey();
     findChord();
   }
@@ -205,16 +215,17 @@ class Ears {
       for (int m = 0; m < 2; m++) {
         const float *p = m ? MIN : MAJ;
         float mp = 0, mc = 0;
-        for (int k = 0; k < 12; k++) { mp += p[k]; mc += chromaLong[k]; }
+        for (int k = 0; k < 12; k++) { mp += p[k]; mc += chromaKey[k]; }
         mp /= 12; mc /= 12;
         float num = 0, dp = 0, dc = 0;
         for (int k = 0; k < 12; k++) {
-          float a = p[(k - r + 12) % 12] - mp, b = chromaLong[k] - mc;
+          float a = p[(k - r + 12) % 12] - mp, b = chromaKey[k] - mc;
           num += a * b; dp += a * a; dc += b * b;
         }
         float corr = num / sqrtf(dp * dc + 1e-12f);
         if (corr > best) { best = corr; st.key = r; st.keyMinor = m; }
       }
+    st.keyCorr = max(0.0f, best);
   }
 
   void findChord() {
@@ -242,6 +253,9 @@ class Ears {
       if (l < quietLog) quietLog = l;
       else quietLog += 0.0005f * (l - quietLog);
       st.loud = l - quietLog;
+      secLoud += st.loud;
+      secLoudN++;
+      if (st.loud > MUSIC_SOUND_DB) secSound++;
       flux = max(0.0f, l - logEslow);
       logEslow += (l - logEslow) * 0.3f;
       onsetMean += (flux - onsetMean) * 0.02f;
@@ -256,6 +270,12 @@ class Ears {
 
   // Once a second: tempo + beat phase from the last 4 s of onsets.
   void tempo(uint32_t now) {
+    // the last second, summed up
+    st.loudAvg = secLoudN ? secLoud / secLoudN : 0;
+    st.continuity = secLoudN ? (float)secSound / secLoudN : 0;
+    st.tonalAvg = secTonalN ? secTonal / secTonalN : 0;
+    secLoud = secTonal = 0;
+    secLoudN = secSound = secTonalN = 0;
     if (onFill < ON) return;
     float o[ON], mean = 0;
     for (int i = 0; i < ON; i++) { o[i] = onset[(onN + i) % ON]; mean += o[i]; }
@@ -298,15 +318,19 @@ class Ears {
       if (s > bestP) { bestP = s; bestO = off; }
     }
     st.lastBeat = frameTimes[(onN + ON - 1 - bestO) % ON];
-    bool musical = st.loud > MUSIC_MIN_DB && st.beatStrength > MUSIC_MIN_BEAT && st.tonality > MUSIC_MIN_TONAL;
+    // Music: loud enough, (almost) never pausing, clear notes, and either staying in one
+    // key or having a beat. Gentle music (no drums) has a weak beat, talking has pauses
+    // and no steady key.
+    bool musical = st.loudAvg > MUSIC_MIN_DB && st.continuity > MUSIC_MIN_CONT && st.tonalAvg > MUSIC_MIN_TONAL &&
+                   (st.keyCorr > MUSIC_MIN_KEY || (st.beatStrength > MUSIC_MIN_BEAT && st.keyCorr > MUSIC_MIN_KEY - 0.15f));
     decide(musical);
   }
 
   void decide(bool musical) {
-    musicHist = ((musicHist << 1) | musical) & 0xF;  // last 4 seconds
+    musicHist = ((musicHist << 1) | musical) & 0xFF;  // last 8 seconds
     int n = __builtin_popcount(musicHist);
-    if (!st.music && n >= 3) st.music = true;
-    else if (st.music && n <= 1) st.music = false;
+    if (!st.music && n >= 5) st.music = true;
+    else if (st.music && n <= 2) st.music = false;
   }
 
   // Hum: autocorrelation at 4 kHz, 100-500 Hz.

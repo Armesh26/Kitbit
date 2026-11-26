@@ -3051,8 +3051,8 @@ void serialStep() {
   if (earsStream && since(lastEarsPrint) > 500) {
     lastEarsPrint = millis();
     static const char *NN[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    Serial.printf("ears music=%d loud=%4.1fdB beat=%.2f tonal=%.2f bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
-                  ears.st.music, ears.st.loud, ears.st.beatStrength, ears.st.tonality, ears.st.bpm,
+    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f tonal=%.2f keyfit=%.2f bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
+                  ears.st.music, ears.st.loudAvg, ears.st.continuity, ears.st.beatStrength, ears.st.tonalAvg, ears.st.keyCorr, ears.st.bpm,
                   ears.st.key >= 0 ? NN[ears.st.key] : "-", ears.st.keyMinor ? "m" : "",
                   ears.st.chord >= 0 ? NN[ears.st.chord] : "-", ears.st.chordMinor ? "m" : "",
                   ears.st.pitch ? (ears.st.pitchKind == 1 ? "whistle " : "hum ") : "-", ears.st.pitch ? ears.st.pitchMidi : 0.0f);
