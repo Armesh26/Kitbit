@@ -344,6 +344,7 @@ static void icon(int x, int y, const uint8_t *bmp, int w, int h) {
   display.drawBitmap(x, y, bmp, w, h, OLED_WHITE);
 }
 static void glyph(int x, int y, char c, uint8_t size) {
+  display.setTextWrap(false);  // never wrap a glyph that touches the edge onto the other side
   display.setTextSize(size);
   display.setTextColor(OLED_WHITE, OLED_BLACK);
   display.setCursor(x, y);
@@ -361,7 +362,7 @@ void drawOverlay() {
     case OV_ZZZ:
       for (int i = 0; i < 3; i++) {
         float p = ((t + i * 900) % 2700) / 2700.0f;  // 0..1, rising
-        int x = 96 + (int)(p * 22);
+        int x = 94 + (int)(p * 20);  // the big Z is 12 px wide: stay left of 116
         int y = 34 - (int)(p * 34);
         glyph(x, y, p > 0.5f ? 'Z' : 'z', p > 0.66f ? 2 : 1);
       }
@@ -2155,6 +2156,7 @@ void setup() {
   display.clearDisplay();
   display.display();
   display.setRotation(DISPLAY_ROTATION);
+  display.setTextWrap(false);  // text near an edge must not reappear on the other side
 
   delay(1500);  // give USB serial a moment so the boot log is visible
   i2cScan();
