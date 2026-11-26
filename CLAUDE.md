@@ -1,0 +1,74 @@
+# KitBit: notes for working on this repo
+
+There are two sketches:
+- `kitbit/` is the desk pet. All tunables are in `kitbit/config.h`.
+- `kitbit_diagnosis/` tests each component one by one.
+
+The user-facing documentation is `README.md`.
+
+## Build
+
+`arduino-cli` is not on PATH. Use the copy bundled with the IDE:
+
+```sh
+A=/home/armesh/Downloads/arduino-ide_2.3.8_Linux_64bit/resources/app/lib/backend/resources/arduino-cli
+$A compile --fqbn esp32:esp32:XIAO_ESP32C3 --warnings all kitbit
+```
+
+This uses ESP32 core 3.3.7. Compile with `--warnings all`. The sketch currently builds with no warnings from `kitbit.ino`.
+
+## Hardware as built (current board)
+
+| Part | Pin / connection |
+|---|---|
+| Board | Seeed XIAO ESP32C3 (single core, no touch hardware) |
+| OLED | 1.3" SH1106, mounted upside down (`DISPLAY_ROTATION 2`) |
+| IMU | MPU6050 clone that is really an MPU6500 (WHO_AM_I 0x70). Driven by direct register access, with no MPU library, because libraries reject the chip ID. The mounting calibration is stored in flash. |
+| I2C | SDA on **D7**, SCL on D5 |
+| Buzzer | Passive, on D1 |
+| Battery | 1S LiPo, 700 mAh, on the BAT pads |
+| Battery divider | Two equal resistors (100k to 130k) from BAT+ to D0 to GND; `BATT_DIVIDER 2.0` |
+| INMP441 mic | Planned on D2 (SCK), D3 (WS) and D10 (SD); not used by the pet sketch yet |
+
+**D4 / GPIO6 is shorted to GND on this board.** Don't use it. That's why SDA moved to D7.
+
+Use D7 rather than D6 for I2C, because the boot ROM prints log output on D6 (TX).
+
+## Battery charging detection
+
+This board has no USB/5V sense wire (`PIN_USB_SENSE -1`), so `battMeasure()` in `kitbit.ino` has to guess whether it's charging. Its signals are:
+
+- **USB connected to a computer** (`HWCDC::isPlugged()`). This is reliable, but it is ignored for the first 5 s after boot, because it misreported when the battery was connected before USB.
+- **The battery voltage jumping up and staying up**, which suggests a charger was plugged in.
+  - Normal check: +0.08 V, confirmed after 20 s, plus a slow-rise rule of +0.07 V over 5 min.
+  - **Long check**, used while asleep or hiding, for 10 min after waking, and for 10 min after boot (`battSettling()`): +0.10 V confirmed after 60 s, and the slow-rise rule is off. Under lighter load in sleep, the voltage creeps up by itself and caused false "charging" readings.
+- **At boot it always assumes "on battery"**, unless it is waking from the empty-battery deep sleep.
+
+These heuristics were tuned after false positives seen on real hardware. If you change them, keep the logging: each state change prints its reason, and the `batt` command shows the current reason.
+
+## Next hardware build: TODO
+
+**Sense USB power directly instead of guessing from the battery voltage.** Add a divider from the XIAO's 5V pin:
+
+```
+5V --[10k]-- D6 --[20k]-- GND
+```
+
+Then set `#define PIN_USB_SENSE D6` in `config.h`. Charging then comes straight from the 5V pin. That covers phone chargers too, and all the voltage-jump heuristics above stop being used, because the `#if PIN_USB_SENSE >= 0` branch replaces them.
+
+First check that the 5V pin reads about 0 V when the board runs on battery alone. If the battery back-feeds that pin, the sense divider won't work.
+
+## Power
+
+- **"Off"** is deep sleep. It is entered with the serial command `off`, or automatically after `AUTO_OFF_FACEDOWN_MIN` face down on battery. It wakes when moved more than 30°, when a charger raises the voltage, or when RESET is pressed.
+- **Below `BATT_SHUTDOWN_V` (3.3 V) for 20 s**, it goes into a protective deep sleep and checks every 60 s for a charger.
+- **`offModeCheck()`** runs first in `setup()` and returns to sleep quickly when there is no reason to wake.
+
+## Code conventions
+
+- **Declare all structs and enums near the top of `kitbit.ino`.** Arduino generates function prototypes, and they break if a type is declared after them.
+- **Include RoboEyes last.** It defines macros such as N, S, E, W, DEFAULT, ON and OFF.
+- **The core already defines `FAIL`**, which is why the diagnosis sketch uses `R_PASS`, `R_FAIL` and `R_CHECK`.
+- **Make sure CuteBuzzerSounds `bendTones()` always advances.** It steps with an int, so check that `freq * (step - 1) >= 1` at the low end of every bend; otherwise it loops forever.
+- **Keep text wrap off on the display.** Glyphs near the edge otherwise wrap to the other side.
+- **Commit messages end with** `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
