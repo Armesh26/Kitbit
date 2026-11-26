@@ -1639,15 +1639,18 @@ void musicStep() {
 #if ENABLE_EARS
   static const char *NOTE_NAMES[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t now = millis();
-  bool on = micOk && ears.st.music && activity == ACT_AWAKE && !calStage && !repeatBusy();
+  bool on = micOk && (ears.st.music || ears.st.singing) && activity == ACT_AWAKE && !calStage && !repeatBusy();
   if (on && !dancing) {
     dancing = true;
     interact();
     react(faceWith(HAPPY), 1500);
     laughEyes();
     showOverlay(OV_NOTES, 2500);
-    Serial.printf("[pet] music! %.0f BPM, key %s %s\n", ears.st.bpm, NOTE_NAMES[max<int>(0, ears.st.key)],
-                  ears.st.keyMinor ? "minor" : "major");
+    if (ears.st.music)
+      Serial.printf("[pet] music! %.0f BPM, key %s %s\n", ears.st.bpm, NOTE_NAMES[max<int>(0, ears.st.key)],
+                    ears.st.keyMinor ? "minor" : "major");
+    else
+      Serial.println(F("[pet] someone is singing!"));
   } else if (!on && dancing) {
     dancing = false;
     if (activity == ACT_AWAKE) { react(faceWith(HAPPY), 1500); say(SND_GIGGLE, 2); }
@@ -3075,8 +3078,8 @@ void serialStep() {
   if (earsStream && since(lastEarsPrint) > 500) {
     lastEarsPrint = millis();
     static const char *NN[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f/%.2f tonal=%.2f keyfit=%.2f bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
-                  ears.st.music, ears.st.loudAvg, ears.st.continuity, ears.st.beatStrength, ears.st.beatAvg, ears.st.tonalAvg, ears.st.keyCorr, ears.st.bpm,
+    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f/%.2f tonal=%.2f steady=%.2f keyfit=%.2f sung=%.2f sing=%d bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
+                  ears.st.music, ears.st.loudAvg, ears.st.continuity, ears.st.beatStrength, ears.st.beatAvg, ears.st.tonalAvg, ears.st.steady, ears.st.keyCorr, ears.st.sung, ears.st.singing, ears.st.bpm,
                   ears.st.key >= 0 ? NN[ears.st.key] : "-", ears.st.keyMinor ? "m" : "",
                   ears.st.chord >= 0 ? NN[ears.st.chord] : "-", ears.st.chordMinor ? "m" : "",
                   ears.st.pitch ? (ears.st.pitchKind == 1 ? "whistle " : "hum ") : "-", ears.st.pitch ? ears.st.pitchMidi : 0.0f);

@@ -22,6 +22,9 @@ struct EarsState {          // read by the pet (written by the mic task)
   float tonalAvg = 0;       // tonality averaged over the last second
   float keyCorr = 0;        // how well the last ~6 s fit one key (0..1): music stays in a key
   float beatAvg = 0;        // beat strength averaged over ~4 s: is the beat clear enough to sing on?
+  float steady = 0;         // how alike consecutive 128 ms note pictures are (held notes ~1, gliding speech lower)
+  float sung = 0;           // share of the last second spent on held notes (singing / humming)
+  bool singing = false;     // someone is singing / humming
   int8_t songPc[3] = {-1, -1, -1};  // the 3 notes (pitch classes) the song played most over ~6 s
   int8_t key = -1;          // 0 = C .. 11 = B
   bool keyMinor = false;
@@ -95,8 +98,23 @@ class Ears {
   int64_t frameE = 0;
   int frameN = 0;
   float logEslow = 0, logE = 0, quietLog = 99, onsetMean = 0;
-  float secLoud = 0, secTonal = 0;
-  int secLoudN = 0, secSound = 0, secTonalN = 0;
+  float secLoud = 0, secTonal = 0, secSteady = 0, prevC[12] = {0};
+  int secLoudN = 0, secSound = 0, secTonalN = 0, secSteadyN = 0;
+  // held notes (singing / humming)
+  float heldRef = 0, secHeld = 0;
+  int heldLen = 0;
+  uint8_t singHist = 0;
+  void heldNote(bool have, float midi) {
+    const int minFrames = SUNG_HOLD_MS / 16;
+    if (have && heldLen && fabsf(midi - heldRef) < 0.5f) {
+      heldLen++;
+      if (heldLen == minFrames) secHeld += minFrames;  // the note just became "held"
+      else if (heldLen > minFrames) secHeld += 1;
+      return;
+    }
+    heldLen = have ? 1 : 0;
+    heldRef = midi;
+  }
   bool frameDirty = false;
   uint32_t frameTimes[ON];
   uint16_t musicHist = 0;
@@ -196,14 +214,17 @@ class Ears {
     for (int i = 0; i < NOTES; i++) c[(MIDI_LO + i) % 12] += sqrtf(e[i]);
     for (float v : c) sum += v;
     if (sum <= 0) return;
-    float mx = 0;
+    float mx = 0, dot = 0, na = 0, nb = 0;
     for (int k = 0; k < 12; k++) {
       c[k] /= sum;
+      dot += c[k] * prevC[k]; na += c[k] * c[k]; nb += prevC[k] * prevC[k];
       chromaLong[k] += (c[k] - chromaLong[k]) * 0.08f;  // ~1.6 s
       chromaKey[k] += (c[k] - chromaKey[k]) * 0.021f;   // ~6 s
       chromaShort[k] += (c[k] - chromaShort[k]) * 0.5f; // ~0.25 s
       mx = max(mx, chromaShort[k]);
     }
+    if (nb > 0) { secSteady += dot / sqrtf(na * nb); secSteadyN++; }
+    memcpy(prevC, c, sizeof prevC);
     st.tonality = mx * 12.0f;  // max / mean
     secTonal += st.tonality;
     secTonalN++;
@@ -297,8 +318,14 @@ class Ears {
     st.loudAvg = secLoudN ? secLoud / secLoudN : 0;
     st.continuity = secLoudN ? (float)secSound / secLoudN : 0;
     st.tonalAvg = secTonalN ? secTonal / secTonalN : 0;
-    secLoud = secTonal = 0;
-    secLoudN = secSound = secTonalN = 0;
+    st.steady = secSteadyN ? secSteady / secSteadyN : 0;
+    st.sung = min(1.0f, secHeld / 62.5f);
+    secHeld = 0;
+    singHist = ((singHist << 1) | (st.sung > SUNG_MIN)) & 0x7;  // last 3 seconds
+    if (!st.singing && __builtin_popcount(singHist) >= 2) st.singing = true;
+    else if (st.singing && __builtin_popcount(singHist) == 0) st.singing = false;
+    secLoud = secTonal = secSteady = 0;
+    secLoudN = secSound = secTonalN = secSteadyN = 0;
     if (onFill < ON) return;
     float o[ON], mean = 0;
     for (int i = 0; i < ON; i++) { o[i] = onset[(onN + i) % ON]; mean += o[i]; }
@@ -357,10 +384,11 @@ class Ears {
     else if (st.music && n <= 2) st.music = false;
   }
 
-  // Hum: autocorrelation at 4 kHz, 100-500 Hz.
+  // Voice pitch (singing / humming): autocorrelation at 4 kHz, ~80-800 Hz.
   void humFrame(uint32_t now) {
-    if (acFill < 256 || frameDirty || st.loud < 15) {
+    if (acFill < 256 || frameDirty || st.loud < 8) {
       if (st.pitchKind == 2) st.pitch = false;
+      heldNote(st.pitch && st.pitchKind == 1, st.pitchMidi);
       return;
     }
     int32_t ac0 = 0;
@@ -369,12 +397,12 @@ class Ears {
     if (ac0 <= 0) return;
     int32_t best = 0;
     int bestL = 0;
-    int32_t acv[42];
-    for (int L = 7; L <= 41; L++) {
+    int32_t acv[52];
+    for (int L = 4; L <= 51; L++) {
       int32_t s = 0;
       for (int i = 0; i + L < 256; i++) s += (int32_t)b[i] * b[i + L] >> 4;
       acv[L] = s;
-      if (L >= 8 && L <= 40 && s > best) { best = s; bestL = L; }
+      if (L >= 5 && L <= 50 && s > best) { best = s; bestL = L; }
     }
     float clarity = (float)best / ac0 * 256.0f / (256 - bestL);
     bool whistling = st.pitch && st.pitchKind == 1;
@@ -386,5 +414,6 @@ class Ears {
     } else if (st.pitchKind == 2) {
       st.pitch = false;
     }
+    heldNote(st.pitch, st.pitchMidi);
   }
 };
