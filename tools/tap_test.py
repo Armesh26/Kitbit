@@ -83,6 +83,16 @@ def main():
     except serial.SerialException as e:
         sys.exit(f"Can't open {args.port}: {e}\nClose the Arduino serial monitor and try again.")
     pet = Pet(ser)
+    # Opening the port reboots the pet: wait until it's up before talking to it.
+    print("waiting for the pet to boot...")
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        pet.pump(0.25)
+        lines = [r[3] for r in pet.rows]
+        if any("Microphone" in l or "taps use the IMU" in l for l in lines):
+            break
+        if time.time() > deadline - 10 and not lines:  # nothing at all for 2 s: it didn't reboot
+            break
     pet.pump(1.0)
 
     # Quiet, awake pet with the debug stream on.
@@ -140,68 +150,63 @@ def main():
 
     # ---- analyse ----
     def trial_data(i):
-        imu, micv, taps, events, flags = [], [], 0, [], set()
+        d = {"imu": [], "mic": [], "kicks": [], "clicks": [], "taps": 0, "events": [], "flags": set()}
         for _, ph, tr, line in pet.rows:
             if tr != i or ph not in ("go", "after"):
                 continue
             p = line.split(",")
-            if p[0] == "S" and len(p) >= 9:
-                ms = int(p[1])
-                if ph == "go":
-                    imu.append((ms, float(p[2])))
-                    micv.append((ms, float(p[3])))
-                    if p[5] == "1": flags.add("held")
-                    if p[6] == "1": flags.add("shaking")
-                    if p[7] == "1": flags.add("falling")
-                    if p[8] == "1": flags.add("sound")
-            elif p[0] == "E":
-                events.append(p[2])
-                if p[2] == "taps":
-                    taps += int(p[3])
-        return imu, micv, taps, events, flags
+            try:
+                if p[0] == "S" and len(p) >= 9 and ph == "go":
+                    d["imu"].append((int(p[1]), float(p[2])))
+                    d["mic"].append((int(p[1]), float(p[3])))
+                    for flag, idx in (("held", 5), ("shaking", 6), ("falling", 7), ("sound", 8)):
+                        if p[idx] == "1":
+                            d["flags"].add(flag)
+                elif p[0] == "K":
+                    d["kicks"].append((int(p[1]), float(p[2])))
+                elif p[0] == "C":
+                    d["clicks"].append((int(p[1]), float(p[2])))
+                elif p[0] == "E":
+                    d["events"].append(p[2])
+                    if p[2] == "taps":
+                        d["taps"] += int(p[3])
+            except (ValueError, IndexError):
+                pass  # a line mangled on the wire
+        return d
 
-    base_imu, base_mic = [], []
-    for i, n in enumerate(trials):
-        if n == 0:
-            imu, micv, *_ = trial_data(i)
-            base_imu += [v for _, v in imu]
-            base_mic += [v for _, v in micv]
-    noise_imu = max(base_imu) if base_imu else 0.02
-    noise_mic = max(base_mic) if base_mic else 0
+    data = [trial_data(i) for i in range(len(trials))]
+    base = [d for d, n in zip(data, trials) if n == 0]
+    noise_imu = max([v for d in base for _, v in d["imu"]] or [0])
+    noise_mic = max([v for d in base for _, v in d["mic"]] or [0])
 
-    print("\n#  asked  detected  IMU jolts (g)                 mic clicks                     notes")
+    print("\n#  asked detected  heard  jolts  click loudness            jolt size (g)        result")
     tap_imu, tap_mic, ok = [], [], 0
-    for i, n in enumerate(trials):
-        imu, micv, taps, events, flags = trial_data(i)
-        ip = sorted(peaks(imu, max(0.02, noise_imu * 1.2)), key=lambda x: -x[1])[: max(n, 3)]
-        mp = sorted(peaks(micv, noise_mic * 1.2 if noise_mic else 1), key=lambda x: -x[1])[: max(n, 3)]
-        if n:
-            tap_imu += [v for _, v in ip[:n]]
-            tap_mic += [v for _, v in mp[:n]]
-        good = taps == n
+    for i, (n, d) in enumerate(zip(trials, data)):
+        good = d["taps"] == n
         ok += good
+        clicks = sorted((v for _, v in d["clicks"]), reverse=True)
+        kicks = sorted((v for _, v in d["kicks"]), reverse=True)
+        if n:
+            tap_mic += clicks[:n]
+            tap_imu += kicks[:n]
         notes = []
-        if events.count("click_ignored"): notes.append(f"{events.count('click_ignored')} click(s) without jolt")
-        if flags: notes.append("while " + "/".join(sorted(flags)))
-        print(f"{i + 1:<2} {n:^5}  {taps:^8}  {', '.join(f'{v:.2f}' for _, v in ip):<29} "
-              f"{', '.join(f'{v:.0f}' for _, v in mp):<30} {'OK ' if good else 'MISS'} {'; '.join(notes)}")
+        for ev in ("click_ignored", "click_blocked"):
+            if d["events"].count(ev):
+                notes.append(f"{d['events'].count(ev)} {ev.replace('click_', 'click ')}")
+        if d["flags"]:
+            notes.append("while " + "/".join(sorted(d["flags"])))
+        print(f"{i + 1:<2} {n:^5} {d['taps']:^8} {len(clicks):^6} {len(kicks):^6} "
+              f"{', '.join(f'{v:.0f}' for v in clicks[:4]):<25} {', '.join(f'{v:.2f}' for v in kicks[:4]):<20} "
+              f"{'OK' if good else 'MISS'} {'; '.join(notes)}")
 
     print(f"\nCorrect: {ok}/{len(trials)}")
-    print(f"Hands-off noise: IMU up to {noise_imu:.3f} g" + (f", mic up to {noise_mic:.0f}" if mic else ""))
+    print(f"Hands-off: IMU up to {noise_imu:.3f} g, mic chunks up to {noise_mic:.0f}")
     if tap_imu:
-        lo = min(tap_imu)
-        print(f"Your taps: IMU {lo:.3f} .. {max(tap_imu):.3f} g (median {statistics.median(tap_imu):.3f})")
-        if lo > noise_imu:
-            print(f"  -> suggested TAP_G / TAP_CONFIRM_G ~ {(lo + noise_imu) / 2:.3f}")
-        else:
-            print("  -> some taps are no stronger than hands-off noise: the IMU alone can't separate them")
-    if mic and tap_mic:
-        lo = min(tap_mic)
-        print(f"Your taps: mic {lo:.0f} .. {max(tap_mic):.0f} (median {statistics.median(tap_mic):.0f})")
-        if lo > noise_mic:
-            print(f"  -> suggested MIC_CLICK_MIN ~ {(lo + noise_mic) / 2:.0f}")
-        else:
-            print("  -> typing / room noise is as loud as some taps: keep TAP_SOURCE 1 (mic + IMU together)")
+        print(f"Tap jolts:  {min(tap_imu):.3f} .. {max(tap_imu):.3f} g  (median {statistics.median(tap_imu):.3f})")
+    if tap_mic:
+        print(f"Tap clicks: {min(tap_mic):.0f} .. {max(tap_mic):.0f}  (median {statistics.median(tap_mic):.0f})")
+    print("ignored = mic heard a click but the pet didn't move (typing / room noise, or a jolt that was too small)")
+    print("blocked = click + jolt, but the pet thought it was being held / shaken / dropped")
     print(f"\nRaw data: {path}")
 
 

@@ -568,7 +568,8 @@ void confusedEyes() { BusLock lock; eyes.anim_confused(); }
 I2SClass i2s;
 #endif
 volatile bool micOk = false;
-volatile uint32_t micClickCount = 0, micClickMs = 0;
+volatile uint32_t micClickCount = 0;
+volatile uint32_t micClickTimes[8];  volatile float micClickPeaks[8];  // last 8 clicks, exact time
 volatile float micBg = 0, micPeakMax = 0;  // for the "mic" serial stream
 volatile float micPeakDbg = 0;              // loudest chunk since the last tapdebug line
 bool micStream = false;
@@ -610,7 +611,9 @@ void micTask(void *) {
       float thresh = max((float)MIC_CLICK_MIN, bg * MIC_CLICK_RATIO);
       if (armed && speakerQuiet && peak > thresh) {
         armed = false;
-        micClickMs = now;
+        uint32_t i = micClickCount % 8;
+        micClickTimes[i] = now - (uint32_t)((n - j) / 16);  // 16 samples per ms
+        micClickPeaks[i] = peak;
         micClickCount = micClickCount + 1;
       } else if (!armed) {  // one click = one count: wait until it's calm again for 40 ms
         if (peak < bg * 2.5f + MIC_CLICK_MIN * 0.2f) {
@@ -634,7 +637,8 @@ void micBegin() {
     Serial.println(F("Microphone: I2S failed to start - taps use the IMU only"));
     return;
   }
-  xTaskCreatePinnedToCore(micTask, "mic", 4096, NULL, 1, NULL, 0);
+  // Above the eyes task: tiny work per block, and its click times must be on time.
+  xTaskCreatePinnedToCore(micTask, "mic", 4096, NULL, 3, NULL, 0);
 #endif
 }
 
@@ -841,28 +845,59 @@ void imuFifoReset() {
   imuWrite(0x6A, 0x40);  // FIFO on
 }
 
-// Biggest kick away from gravity among the new FIFO samples (g), and its direction
-// in the sensor frame. Returns -1 if nothing was read.
+// Recent jolts of the pet with their exact time (from the sample's place in the FIFO),
+// so they can be matched with mic clicks even when the bus was busy with the screen.
+uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickIdx = 0;
+
+// Drains the whole FIFO (500 Hz) and returns the biggest kick away from gravity (g),
+// with its direction in the sensor frame. Returns -1 if nothing was read.
 float imuFifoPeak(float dir[3]) {
-  uint8_t c[2];
+  uint8_t st = 0, c[2];
+  if (imuRead(0x3A, &st, 1) && (st & 0x10)) { imuFifoReset(); return -1; }  // overflowed: samples lost
   if (!imuRead(0x72, c, 2)) return -1;
   uint16_t count = (uint16_t)(c[0] << 8 | c[1]);
-  if (count == 0) return -1;
-  if (count >= 900 || count % 6) { imuFifoReset(); return -1; }  // overflow / out of step
-  uint8_t n = min<uint16_t>(count / 6, 20);  // 20 samples = 120 bytes, fits the I2C buffer
-  uint8_t b[120];
-  if (!imuRead(0x74, b, n * 6)) return -1;
+  if (count < 6) return -1;
+  if (count % 6) { imuFifoReset(); return -1; }  // out of step
+  uint16_t total = count / 6, done = 0;
+  uint32_t now = millis();
+  static uint32_t lastKickAt = 0;
   float peak = 0;
-  for (uint8_t i = 0; i < n; i++) {
-    float s[3];
-    for (int k = 0; k < 3; k++) s[k] = (int16_t)(b[i * 6 + k * 2] << 8 | b[i * 6 + k * 2 + 1]) / 8192.0f;
-    if (!fifoGravInit) { memcpy(fifoGrav, s, sizeof s); fifoGravInit = true; }
-    float d[3], m = 0;
-    for (int k = 0; k < 3; k++) { d[k] = s[k] - fifoGrav[k]; m += d[k] * d[k]; fifoGrav[k] += d[k] * 0.01f; }
-    m = sqrtf(m);
-    if (m > peak) { peak = m; memcpy(dir, d, sizeof d); }
+  uint8_t b[120];
+  while (done < total) {
+    uint8_t n = min<uint16_t>(total - done, 20);  // 20 samples = 120 bytes, fits the I2C buffer
+    if (!imuRead(0x74, b, n * 6)) { imuFifoReset(); return peak > 0 ? peak : -1; }
+    for (uint8_t i = 0; i < n; i++) {
+      float s[3];
+      for (int k = 0; k < 3; k++) s[k] = (int16_t)(b[i * 6 + k * 2] << 8 | b[i * 6 + k * 2 + 1]) / 8192.0f;
+      if (!fifoGravInit) { memcpy(fifoGrav, s, sizeof s); fifoGravInit = true; }
+      float d[3], m = 0;
+      for (int k = 0; k < 3; k++) { d[k] = s[k] - fifoGrav[k]; m += d[k] * d[k]; fifoGrav[k] += d[k] * 0.01f; }
+      m = sqrtf(m);
+      if (m > peak) { peak = m; memcpy(dir, d, sizeof d); }
+      uint32_t t = now - (uint32_t)(total - 1 - (done + i)) * 2;  // 2 ms per sample
+      if (m > TAP_CONFIRM_G && t - lastKickAt > 30) {
+        lastKickAt = t;
+        kickMs[kickIdx] = t;
+        kickSide[kickIdx] = toBody(d).x;
+        kickIdx = (kickIdx + 1) % 8;
+        if (tapDebug) Serial.printf("K,%lu,%.3f\n", (unsigned long)t, m);
+      }
+    }
+    done += n;
   }
   return peak;
+}
+
+// Was there a jolt close to time t? Uses it up, so one jolt confirms one click.
+bool takeKickNear(uint32_t t, float *side) {
+  for (int i = 0; i < 8; i++) {
+    if (kickMs[i] && (uint32_t)abs((int32_t)(kickMs[i] - t)) <= TAP_MATCH_MS) {
+      *side = kickSide[i];
+      kickMs[i] = 0;
+      return true;
+    }
+  }
+  return false;
 }
 
 void imuStep() {
@@ -978,24 +1013,37 @@ void imuStep() {
                   handling, shaking, falling, soundPlaying);
     micPeakDbg = 0;
   }
-  static uint32_t lastKickMs = 0, seenClicks = 0, pendingClickMs = 0;
-  static float lastKickSide = 0;
-  static bool clickPending = false;
-  if (tapG > TAP_CONFIRM_G) { lastKickMs = now; lastKickSide = kick >= 0 ? toBody(kickDir).x : dyn.x; }
+  // Every mic click waits (up to ~200 ms, the sensor may be read late) for a jolt
+  // with a matching time stamp.
+  static uint32_t seenClicks = 0;
+  static uint32_t pending[8];
+  static uint8_t pendingN = 0;
+  if (!fifoOk && tapG > TAP_CONFIRM_G) {  // no FIFO: best effort with the step time
+    kickMs[kickIdx] = now; kickSide[kickIdx] = dyn.x; kickIdx = (kickIdx + 1) % 8;
+  }
   if (micOk) {
-    if (micClickCount != seenClicks) { seenClicks = micClickCount; pendingClickMs = micClickMs; clickPending = true; }
-    if (clickPending) {
-      bool jolted = TAP_SOURCE == 2 ||
-                    (lastKickMs && (uint32_t)abs((int32_t)(lastKickMs - pendingClickMs)) <= TAP_MATCH_MS);
-      if (jolted && !handling && !falling && !shaking) {
-        if (tapDebug) Serial.printf("E,%lu,click_tap\n", (unsigned long)now);
-        clickPending = false;
-        tapCount++;
-        tapSide += lastKickSide;
-        lastTapMs = now;
-      } else if (now - pendingClickMs > TAP_MATCH_MS + 20) {
-        if (tapDebug) Serial.printf("E,%lu,click_ignored\n", (unsigned long)now);
-        clickPending = false;  // just a noise in the room
+    while (seenClicks != micClickCount) {
+      uint32_t i = seenClicks % 8;
+      if (tapDebug) Serial.printf("C,%lu,%.0f\n", (unsigned long)micClickTimes[i], micClickPeaks[i]);
+      if (pendingN < 8) pending[pendingN++] = micClickTimes[i];
+      seenClicks++;
+    }
+    for (uint8_t p = 0; p < pendingN;) {
+      float side = 0;
+      bool jolted = TAP_SOURCE == 2 || takeKickNear(pending[p], &side);
+      bool expired = now - pending[p] > TAP_MATCH_MS + 150;
+      if (jolted || expired) {
+        if (jolted && !handling && !falling && !shaking) {
+          tapCount++;
+          tapSide += side;
+          lastTapMs = now;
+          if (tapDebug) Serial.printf("E,%lu,click_tap\n", (unsigned long)now);
+        } else if (tapDebug) {
+          Serial.printf("E,%lu,%s\n", (unsigned long)now, jolted ? "click_blocked" : "click_ignored");
+        }
+        pending[p] = pending[--pendingN];
+      } else {
+        p++;
       }
     }
   }
