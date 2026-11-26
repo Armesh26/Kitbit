@@ -79,8 +79,9 @@
 #define HF_CUTOFF_HZ       20.0f
 #define TAP_CONFIRM_G      0.04f   // the tiny IMU jolt that confirms a mic click was on the pet
 #define TAP_MATCH_MS       150     // click and jolt must be this close in time (measured: usually <35 ms, seen 115)
-// Typing vs tapping (e.g. the pet sitting on a laptop): typing is a stream of clicks and
-// jolts; taps stand out from quiet and from the background jolts of the surface.
+// Typing guard: 0 = off (on a keyboard it reacts to typing - put it face down to quiet it).
+#define TYPING_GUARD       0
+// (only with TYPING_GUARD 1:)
 #define TYPING_EVENTS      6       // this many touches (click + jolt = one) within TYPING_WINDOW_MS...
 #define TYPING_WINDOW_MS   2500
 #define TYPING_MIN_SPAN_MS 1500    // ...spread over at least this long (a quick triple tap never is) = typing

@@ -1181,7 +1181,7 @@ void imuStep() {
   if (!tapArmed && tapG < TAP_G * 0.5f && now - lastTapCandMs > TAP_DEBOUNCE_MS) tapArmed = true;
   // Taps count in any position, desk or hand; only being swung / shaken / dropped /
   // just grabbed blocks them.
-  bool tapBlocked = falling || shaking || gyroMag > TAP_MAX_GYRO_DPS || now - pickupMs < PICKUP_IGNORE_MS;
+  bool tapBlocked = falling || shaking;  // taps count everywhere: desk, hand, air
   if (tapArmed && quietSpeaker && !tapBlocked) {
     if (tapG > BUMP_G) {
       ev.bump = true;
@@ -1243,7 +1243,7 @@ void imuStep() {
     // continuous noise of a head scratch). No taps until it has calmed down.
     uint32_t first = 0, lastT = 0;
     int recentN = activityBetween(now - TYPING_WINDOW_MS, now + 1, &first, &lastT);
-    if (recentN >= TYPING_EVENTS && lastT - first >= TYPING_MIN_SPAN_MS && !scratching && !scratchLooking()) {
+    if (TYPING_GUARD && recentN >= TYPING_EVENTS && lastT - first >= TYPING_MIN_SPAN_MS && !scratching && !scratchLooking()) {
       if ((int32_t)(typingUntil - now) <= 0 && tapDebug) Serial.printf("E,%lu,typing\n", (unsigned long)now);
       typingUntil = now + TYPING_QUIET_MS;
       busyUntil = now + TYPING_BUSY_MS;
