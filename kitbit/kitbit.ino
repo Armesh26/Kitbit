@@ -919,6 +919,17 @@ void imuFifoReset() {
 // Each jolt is a "hit": after SLAM_RING_TO_MS it is judged a tap or a desk slam.
 const uint8_t HIT_PENDING = 0, HIT_TAP = 1, HIT_SLAM = 2;
 uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickVerdict[8] = {0};  uint8_t kickIdx = 0;
+float kickPeak[8] = {0};
+// Everything that happened (mic clicks, jolts), for telling typing from tapping.
+uint32_t actTimes[32];  uint8_t actIdx = 0;
+float bgJolt = 0.02f;  // typical jolt of whatever is going on around it (keystrokes on a laptop...)
+uint32_t typingUntil = 0;
+void logActivity(uint32_t t) { actTimes[actIdx] = t; actIdx = (actIdx + 1) % 32; }
+int activityBetween(uint32_t from, uint32_t to) {  // events with from <= t < to
+  int n = 0;
+  for (int i = 0; i < 32; i++) if (actTimes[i] && (int32_t)(actTimes[i] - from) >= 0 && (int32_t)(actTimes[i] - to) < 0) n++;
+  return n;
+}
 bool slamPending = false;
 uint32_t slamAt = 0;
 // Plain jolt log for the face-down "switch off" double tap: face down on the desk every
@@ -982,6 +993,8 @@ float imuFifoPeak(float dir[3]) {
           hitSlot = kickIdx;
           kickMs[kickIdx] = t;
           kickSide[kickIdx] = toBody(d).x;
+          kickPeak[kickIdx] = m;
+          logActivity(t);
           kickVerdict[kickIdx] = HIT_PENDING;
           kickIdx = (kickIdx + 1) % 8;
         } else if (hitOpen) {
@@ -1011,6 +1024,8 @@ float imuFifoPeak(float dir[3]) {
         hitOpen = false;
         bool slam = hitRings && hitPeak > SLAM_MIN_G && onSurface;  // in a hand there's no desk to slam
         kickVerdict[hitSlot] = slam ? HIT_SLAM : HIT_TAP;
+        kickPeak[hitSlot] = hitPeak;
+        bgJolt = clampf(bgJolt + (hitPeak - bgJolt) * 0.1f, 0.02f, 2.0f);  // background level of this surface
         if (slam && !soundPlaying) { slamPending = true; slamAt = hitStart; }
         if (tapDebug) Serial.printf("H,%lu,%s,%.2f\n", (unsigned long)hitStart, slam ? "slam" : "tap", hitPeak);
       }
@@ -1029,11 +1044,12 @@ float imuFifoPeak(float dir[3]) {
 
 // Was there a hit close to time t? Returns HIT_TAP / HIT_SLAM (and uses it up, so one
 // hit confirms one click), -1 if that hit isn't judged yet, 0 if there was none.
-int takeKickNear(uint32_t t, float *side) {
+int takeKickNear(uint32_t t, float *side, float *peak = nullptr) {
   for (int i = 0; i < 8; i++) {
     if (kickMs[i] && (uint32_t)abs((int32_t)(kickMs[i] - t)) <= TAP_MATCH_MS) {
       if (kickVerdict[i] == HIT_PENDING) return -1;
       *side = kickSide[i];
+      if (peak) *peak = kickPeak[i];
       kickMs[i] = 0;
       return kickVerdict[i];
     }
@@ -1156,7 +1172,7 @@ void imuStep() {
       lastTapCandMs = now;
       tapArmed = false;
       tapCount = 0;
-    } else if (!micOk && tapG > TAP_G) {  // no mic: the IMU alone decides
+    } else if (!micOk && tapG > TAP_G && (int32_t)(typingUntil - now) <= 0) {  // no mic: the IMU alone decides
       tapCount++;
       tapSide += kick >= 0 ? toBody(kickDir).x : dyn.x;
       lastTapMs = lastTapCandMs = now;
@@ -1189,7 +1205,8 @@ void imuStep() {
     static uint32_t lastSlam = 0;
     bool cooled = !lastSlam || now - lastSlam > SLAM_COOLDOWN_MS;
     if (tapDebug && (!bang || !cooled)) Serial.printf("E,%lu,bump_ignored_%s\n", (unsigned long)now, bang ? "cooldown" : "quiet");
-    if (bang && cooled && !falling && !shaking) {
+    bool typingNow = (int32_t)(typingUntil - now) > 0;
+    if (bang && cooled && !falling && !shaking && !typingNow) {
       lastSlam = now;
       ev.bump = true;
       tapCount = 0;
@@ -1201,21 +1218,41 @@ void imuStep() {
       uint32_t i = seenClicks % 8;
       if (tapDebug) Serial.printf("C,%lu,%.0f\n", (unsigned long)micClickTimes[i], micClickPeaks[i]);
       if (pendingN < 8) pending[pendingN++] = micClickTimes[i];
+      logActivity(micClickTimes[i]);
       seenClicks++;
     }
+    bgJolt += (0.02f - bgJolt) * 0.003f;  // quiet again: back to the floor within ~5 s
+    // Typing: a stream of clicks / jolts. No taps until it has calmed down.
+    if (activityBetween(now - TYPING_WINDOW_MS, now + 1) >= TYPING_EVENTS) {
+      if ((int32_t)(typingUntil - now) <= 0 && tapDebug) Serial.printf("E,%lu,typing\n", (unsigned long)now);
+      typingUntil = now + TYPING_QUIET_MS;
+      tapCount = 0;
+    }
+    bool typing = (int32_t)(typingUntil - now) > 0;
     for (uint8_t p = 0; p < pendingN;) {
-      float side = 0;
-      int hit = TAP_SOURCE == 2 ? HIT_TAP : takeKickNear(pending[p], &side);
+      float side = 0, peak = 0;
+      int hit = TAP_SOURCE == 2 ? HIT_TAP : takeKickNear(pending[p], &side, &peak);
       bool expired = now - pending[p] > TAP_MATCH_MS + SLAM_RING_TO_MS + 150;  // hit judged + sensor read late
       bool jolted = hit == HIT_TAP;
       if (hit == HIT_TAP || hit == HIT_SLAM || expired) {
         if (hit == HIT_SLAM) {
           if (tapDebug) Serial.printf("E,%lu,click_slam\n", (unsigned long)now);  // part of the slam, not a tap
         } else if (jolted && !tapBlocked) {
-          tapCount++;
-          tapSide += side;
-          lastTapMs = now;
-          if (tapDebug) Serial.printf("E,%lu,click_tap\n", (unsigned long)now);
+          const char *why = nullptr;
+          if (typing) why = "typing";
+          else if (TAP_SOURCE != 2 && peak < bgJolt * TAP_REL) why = "weak";  // no stronger than the background
+          else if (!tapCount && activityBetween(pending[p] - TAP_QUIET_BEFORE_MS, pending[p] - TAP_MATCH_MS) > 0) why = "noquiet";
+          if (why) {
+            if (tapDebug) Serial.printf("E,%lu,click_%s\n", (unsigned long)now, why);
+          } else if (++tapCount > TAP_MAX_GROUP) {  // too many in a row: that's typing
+            tapCount = 0;
+            typingUntil = now + TYPING_QUIET_MS;
+            if (tapDebug) Serial.printf("E,%lu,click_toomany\n", (unsigned long)now);
+          } else {
+            tapSide += side;
+            lastTapMs = now;
+            if (tapDebug) Serial.printf("E,%lu,click_tap\n", (unsigned long)now);
+          }
         } else if (tapDebug) {
           Serial.printf("E,%lu,%s\n", (unsigned long)now, jolted ? "click_blocked" : "click_ignored");
         }
@@ -1237,7 +1274,7 @@ void imuStep() {
       bool scratchy = micPeakWin > micBg * SCRATCH_MIC_RATIO && winImu > SCRATCH_IMU_G;
       scratchBits = ((scratchBits << 1) | scratchy) & 0x3FF;
       int n = __builtin_popcount(scratchBits);
-      if (!scratching && n >= SCRATCH_START_OF_10 && !shaking && !falling) {
+      if (!scratching && n >= SCRATCH_START_OF_10 && !shaking && !falling && (int32_t)(typingUntil - now) <= 0) {
         scratching = true;
         scratchStartMs = now;
         ev.scratchStart = true;

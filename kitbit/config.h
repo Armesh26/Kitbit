@@ -79,6 +79,14 @@
 #define HF_CUTOFF_HZ       20.0f
 #define TAP_CONFIRM_G      0.04f   // the tiny IMU jolt that confirms a mic click was on the pet
 #define TAP_MATCH_MS       150     // click and jolt must be this close in time (measured: usually <35 ms, seen 115)
+// Typing vs tapping (e.g. the pet sitting on a laptop): typing is a stream of clicks and
+// jolts; taps stand out from quiet and from the background jolts of the surface.
+#define TYPING_EVENTS      5       // this many clicks / jolts within TYPING_WINDOW_MS = typing...
+#define TYPING_WINDOW_MS   2000
+#define TYPING_QUIET_MS    1200    // ...and no taps until it has been quiet this long
+#define TAP_QUIET_BEFORE_MS 700    // a tap group must start after this much quiet
+#define TAP_MAX_GROUP      4       // more events in one group = not tapping
+#define TAP_REL            2.0f    // a tap's jolt must be this many times the recent background jolts
 // Tap or desk slam? Measured: after a slam the desk keeps the pet shaking for ~70-85 ms,
 // after a finger tap the jolt is gone at once. So a jolt that is still above SLAM_RING_G
 // SLAM_RING_FROM_MS after it started (checked until SLAM_RING_TO_MS) was a slam.
