@@ -58,7 +58,7 @@
 // Taps are measured from the sensor's own 250 Hz buffer: the peak kick (g) away from gravity.
 // Watch "tap=" in the "imu" stream while tapping to tune these.
 #define TAP_G              0.20f   // a kick bigger than this counts as a tap / knock
-#define BUMP_G             1.50f   // anything harder is a startling bump / desk slam
+#define BUMP_G             3.00f   // anything harder is a startling bump / desk slam (firm taps reach ~1.8 g)
 #define TAP_DEBOUNCE_MS    120
 
 // ---------------- Microphone (INMP441, I2S) -----------------------------
