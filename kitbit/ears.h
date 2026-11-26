@@ -454,6 +454,7 @@ class Ears {
     if (acFill < 256 || frameDirty || st.loud < 8) {
       if (st.pitchKind == 2) st.pitch = false;
       heldNote(st.pitch && st.pitchKind == 1, st.pitchMidi);
+      singingTimeout(now);
       return;
     }
     int32_t ac0 = 0;
@@ -480,7 +481,11 @@ class Ears {
       st.pitch = false;
     }
     heldNote(st.pitch, st.pitchMidi);
-    // Fast exit: no pitch at all for SING_END_MS -> the singing / humming has stopped.
+    singingTimeout(now);
+  }
+
+  // Fast exit: no pitch at all for SING_END_MS -> the singing / humming has stopped.
+  void singingTimeout(uint32_t now) {
     if (st.pitch) lastVoiceMs = now;
     if (st.singing && now - lastVoiceMs > SING_END_MS) { st.singing = false; singHist = 0; }
   }
