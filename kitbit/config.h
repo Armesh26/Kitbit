@@ -22,7 +22,7 @@
 #define SCREEN_WIDTH       128
 #define SCREEN_HEIGHT      64
 #define OLED_ADDR          0x3C
-#define DISPLAY_ROTATION   0       // 0 = normal, 2 = display mounted upside down
+#define DISPLAY_ROTATION   2       // 0 = normal, 2 = display mounted upside down (180 deg)
 #define EYES_FPS           30
 // The OLED and the MPU6050 share the I2C bus. 400 kHz is the OLED's rated
 // maximum; going faster garbles the picture on many modules.
