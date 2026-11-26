@@ -1414,7 +1414,7 @@ void petMe() {  // double tap or touch pad
   showOverlay(OV_HEARTS, 2500);
   laughEyes();
   say(random(2) ? S_CUDDLY : SND_PURR);
-  addHappiness(8);
+  addHappiness(PET_JOY);
 }
 
 void boop(float side) {
@@ -1423,7 +1423,7 @@ void boop(float side) {
   // The tap pushes the pet away from where it came from: look towards the finger.
   glance(side > 0 ? -1.0f : 1.0f, frand(-0.3f, 0.2f), 1200);
   say(SND_CHIRP);
-  addHappiness(2);
+  addHappiness(PET_JOY / 5);
 }
 
 void sing() {
@@ -1437,7 +1437,7 @@ void sing() {
   showOverlay(OV_NOTES, 4000);
   laughEyes();
   say(random(2) ? SND_SONG_A : SND_SONG_B);
-  addHappiness(5);
+  addHappiness(PET_JOY / 2);
   addEnergy(-3);
 }
 
@@ -1522,7 +1522,7 @@ void scratchStep() {  // 50 Hz while being scratched: happy squint, hearts, purr
     say(SND_PURR);
     nextPurrAt = millis() + 1800;
   }
-  addHappiness(0.02f);  // ~1 point per second
+  addHappiness(SCRATCH_JOY_PER_S / 50.0f);  // brain runs at 50 Hz
 }
 
 void onScratchEnd(uint32_t ms) {

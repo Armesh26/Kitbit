@@ -129,6 +129,8 @@
 #define SLEEP_AFTER_MIN    12      // ... -> asleep
 #define AWAY_MIN           15      // you were gone this long -> welcome-back greeting
 #define SNORE_MINUTES      8       // only snores while drifting off, then sleeps silently
+#define PET_JOY            20      // happiness from a double-tap pet (boop: 1/5, song: 1/2). Sad below 30.
+#define SCRATCH_JOY_PER_S  4.0f    // happiness per second of head scratches
 #define ENERGY_AWAKE_HOURS 6.0f    // full -> empty while awake
 #define ENERGY_RECHARGE_MIN 45.0f  // empty -> full while asleep
 
