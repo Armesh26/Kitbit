@@ -20,7 +20,8 @@ import time
 
 import serial
 
-WORDS = {0: "DON'T TOUCH", 1: "TAP ONCE", 2: "TAP TWICE", 3: "TAP 3 TIMES"}
+WORDS = {0: "DON'T TOUCH", 1: "TAP ONCE", 2: "TAP TWICE", 3: "TAP 3 TIMES", -1: "SLAM THE DESK"}
+SLAM = -1
 
 
 def open_port(port, baud):
@@ -76,6 +77,7 @@ def main():
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--slam", action="store_true", help="tap once vs slam the desk, to tell them apart")
     args = ap.parse_args()
 
     try:
@@ -112,9 +114,13 @@ def main():
     print(f"tapdebug on, microphone {'working' if mic else 'NOT working (IMU only)'}")
 
     trials = []
-    for _ in range(args.rounds):
-        trials += [1, 2, 3]
-    trials += [0, 0]  # baseline: hands off (the second one: type on your keyboard)
+    if args.slam:
+        for _ in range(max(args.rounds, 4)):
+            trials += [1, SLAM]
+    else:
+        for _ in range(args.rounds):
+            trials += [1, 2, 3]
+        trials += [0, 0]  # baseline: hands off (the second one: type on your keyboard)
 
     print("Watch the pet's screen and do what it says.\n")
     for i, n in enumerate(trials):
@@ -164,6 +170,8 @@ def main():
                             d["flags"].add(flag)
                 elif p[0] == "K":
                     d["kicks"].append((int(p[1]), float(p[2])))
+                    if len(p) >= 6:
+                        d.setdefault("dirs", []).append((int(p[1]), float(p[2]), float(p[3]), float(p[4]), float(p[5])))
                 elif p[0] == "C":
                     d["clicks"].append((int(p[1]), float(p[2])))
                 elif p[0] == "E":
@@ -182,11 +190,11 @@ def main():
     print("\n#  asked detected  heard  jolts  click loudness            jolt size (g)        result")
     tap_imu, tap_mic, ok = [], [], 0
     for i, (n, d) in enumerate(zip(trials, data)):
-        good = d["taps"] == n
+        good = (d["taps"] == 0 and "bump" in d["events"]) if n == SLAM else d["taps"] == n
         ok += good
         clicks = sorted((v for _, v in d["clicks"]), reverse=True)
         kicks = sorted((v for _, v in d["kicks"]), reverse=True)
-        if n:
+        if n > 0:
             tap_mic += clicks[:n]
             tap_imu += kicks[:n]
         notes = []
@@ -207,6 +215,29 @@ def main():
         print(f"Tap clicks: {min(tap_mic):.0f} .. {max(tap_mic):.0f}  (median {statistics.median(tap_mic):.0f})")
     print("ignored = mic heard a click but the pet didn't move (typing / room noise, or a jolt that was too small)")
     print("blocked = click + jolt, but the pet thought it was being held / shaken / dropped")
+    if args.slam:
+        # Features of the first event in each trial, to see what separates a tap from a slam.
+        print("\nfeatures of the first hit:  kind   size g  up-share  side-share  ring ms  #jolts/300ms  click")
+        feats = {1: [], SLAM: []}
+        for i, (n, d) in enumerate(zip(trials, data)):
+            dirs = d.get("dirs", [])
+            if not dirs:
+                print(f"  trial {i + 1}: nothing felt")
+                continue
+            t0 = dirs[0][0]
+            burst = [x for x in dirs if x[0] - t0 <= 300]
+            big = max(burst, key=lambda x: x[1])
+            m = big[1] or 1
+            up, side = abs(big[3]) / m, (abs(big[2]) + abs(big[4])) / m
+            ring = max(x[0] for x in burst if x[1] > 0.1) - t0 if any(x[1] > 0.1 for x in burst) else 0
+            click = max([v for t, v in d["clicks"] if abs(t - t0) < 200] or [0])
+            feats[n].append((big[1], up, ring, len(burst), click))
+            print(f"  trial {i + 1:<2} {'SLAM' if n == SLAM else 'tap ':<6} {big[1]:6.2f}  {up:8.2f}  {side:10.2f}  {ring:7d}  {len(burst):12d}  {click:9.0f}")
+        for n, name in ((1, "taps "), (SLAM, "slams")):
+            if feats[n]:
+                cols = list(zip(*feats[n]))
+                print(f"  {name}: size {min(cols[0]):.2f}-{max(cols[0]):.2f} g, up-share {min(cols[1]):.2f}-{max(cols[1]):.2f}, "
+                      f"ring {min(cols[2])}-{max(cols[2])} ms, jolts {min(cols[3])}-{max(cols[3])}, click {min(cols[4]):.0f}-{max(cols[4]):.0f}")
     print(f"\nRaw data: {path}")
 
 

@@ -888,7 +888,10 @@ float imuFifoPeak(float dir[3]) {
         kickMs[kickIdx] = t;
         kickSide[kickIdx] = toBody(d).x;
         kickIdx = (kickIdx + 1) % 8;
-        if (tapDebug) Serial.printf("K,%lu,%.3f\n", (unsigned long)t, m);
+        if (tapDebug) {  // K,ms,size g,body right,up,out (direction of the jolt)
+          Vec3 bd = toBody(d);
+          Serial.printf("K,%lu,%.3f,%.3f,%.3f,%.3f\n", (unsigned long)t, m, bd.x, bd.y, bd.z);
+        }
       }
     }
     done += n;
@@ -1003,6 +1006,7 @@ void imuStep() {
   if (tapArmed && quietSpeaker && !handling && !falling && !shaking) {
     if (tapG > BUMP_G) {
       ev.bump = true;
+      if (tapDebug) Serial.printf("E,%lu,bump\n", (unsigned long)now);
       lastTapCandMs = now;
       tapArmed = false;
       tapCount = 0;
