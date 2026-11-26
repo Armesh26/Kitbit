@@ -86,6 +86,96 @@ def track(x, mode):
     return smooth
 
 
+# ---------------------------------------------------------------------------
+# "canon" mode: knows the key, tracks one smooth melody line, snaps to the beat
+# ---------------------------------------------------------------------------
+KEY_PCS = {"D": [2, 4, 6, 7, 9, 11, 1]}  # D major: D E F# G A B C#
+CANON_LO, CANON_HI = 64, 90  # E4 .. F#6
+
+
+def spectra(x, hop):
+    win = np.hanning(FRAME)
+    return np.array([np.abs(np.fft.rfft(x[s:s + FRAME] * win)) for s in range(0, len(x) - FRAME, hop)])
+
+
+def estimate_beat(x, bpm_lo=60, bpm_hi=100):
+    """Tempo (quarter-note BPM) and phase (s) from spectral-flux onsets."""
+    hop = 256
+    M = spectra(x, hop)
+    L = np.log1p(10 * M)
+    flux = np.maximum(0, np.diff(L, axis=0)).sum(1)
+    flux = flux - flux.mean()
+    fps = SR / hop
+    ac = np.correlate(flux, flux, "full")[len(flux) - 1:]
+    best = max(range(bpm_lo, bpm_hi + 1),
+               key=lambda b: ac[int(round(fps * 60 / b))] + ac[int(round(fps * 30 / b))])  # beat + half-beat
+    # finer: 0.5 BPM steps around it
+    cands = np.arange(best - 1.5, best + 1.6, 0.25)
+    bpm = max(cands, key=lambda b: sum(ac[int(round(fps * 60 * k / b))] for k in (1, 2, 4) if int(round(fps * 60 * k / b)) < len(ac)))
+    period = fps * 60 / bpm / 2  # eighth notes, in flux frames
+    phases = np.arange(0, period, 0.5)
+    def score(ph):
+        idx = (ph + np.arange(0, len(flux) - ph, period)).astype(int)
+        return flux[idx].sum()
+    phase = max(phases, key=score) / fps
+    return float(bpm), float(phase)
+
+
+def canon_track(x, key="D"):
+    """Viterbi melody line over key notes. Returns (frame times s, midi per frame, 0 = rest)."""
+    hop = HOP // 2  # 16 ms
+    M = spectra(x, hop) ** 0.5
+    allowed = [m for m in range(CANON_LO, CANON_HI + 1) if m % 12 in KEY_PCS[key]]
+    sal = np.array([salience(row) for row in M])  # frames x MIDI_LO..MIDI_HI
+    S = np.stack([sal[:, m - MIDI_LO] if MIDI_LO <= m <= MIDI_HI else np.zeros(len(sal)) for m in allowed], 1)
+    S = S * (1 + 0.03 * (np.array(allowed) - CANON_LO))  # preference for the top line (chords sit below it)
+    energy = np.sqrt((M ** 4).mean(1))
+    voiced = energy > 0.3 * np.median(energy)
+    # emission: log of normalised salience
+    E = np.log(S / (S.max(1, keepdims=True) + 1e-9) + 1e-3)
+    n, k = E.shape
+    jumps = np.abs(np.subtract.outer(allowed, allowed))
+    T = -0.15 * jumps - 3.0 * (jumps >= 12)  # mostly smooth, but runs move fast; no octave flips
+    T[jumps == 0] += 0.1                      # a little stickiness against flicker
+    score = E[0].copy()
+    back = np.zeros((n, k), dtype=int)
+    for t in range(1, n):
+        cand = score[:, None] + T
+        back[t] = cand.argmax(0)
+        score = cand.max(0) + E[t]
+    path = [int(score.argmax())]
+    for t in range(n - 1, 0, -1):
+        path.append(back[t][path[-1]])
+    path = path[::-1]
+    midi = np.array([allowed[i] for i in path])
+    midi[~voiced] = 0
+    times = (np.arange(n) * hop + FRAME / 2) / SR
+    return times, midi
+
+
+def canon_events(x, key="D"):
+    bpm, phase = estimate_beat(x)
+    times, midi = canon_track(x, key)
+    eighth = 60.0 / bpm / 4  # sixteenth-note grid (the canon has fast runs)
+    events = []
+    t = phase
+    if phase > 0.02:
+        events.append([0, int(phase * 1000)])
+    while t < times[-1]:
+        sel = midi[(times >= t) & (times < t + eighth)]
+        if len(sel):
+            vals, counts = np.unique(sel, return_counts=True)
+            m = int(vals[counts.argmax()])
+        else:
+            m = 0
+        if events and events[-1][0] == m:
+            events[-1][1] += eighth * 1000
+        else:
+            events.append([m, eighth * 1000])
+        t += eighth
+    return bpm, [(m, int(round(d))) for m, d in events]
+
+
 def to_events(frames, min_ms=90):
     """Frame track -> list of (midi, ms); midi 0 = rest."""
     events = []
@@ -146,13 +236,17 @@ def play_on_pet(events, port):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("wav")
-    ap.add_argument("--mode", choices=["skyline", "loudest"], default="skyline")
+    ap.add_argument("--mode", choices=["skyline", "loudest", "canon"], default="canon")
     ap.add_argument("--play", action="store_true", help="play the result on the pet's buzzer")
     ap.add_argument("--port", default="/dev/ttyACM0")
     args = ap.parse_args()
 
     x = load(args.wav)
-    events = to_events(track(x, args.mode))
+    if args.mode == "canon":
+        bpm, events = canon_events(x)
+        print(f"tempo {bpm:.1f} BPM (quarter notes), key D major, notes snapped to sixteenths")
+    else:
+        events = to_events(track(x, args.mode))
     base = os.path.splitext(args.wav)[0]
     out_wav = f"{base}_{args.mode}_buzzer.wav"
     render(events, out_wav)
