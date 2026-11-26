@@ -21,8 +21,10 @@ import time
 import serial
 
 WORDS = {0: "DON'T TOUCH", 1: "TAP ONCE", 2: "TAP TWICE", 3: "TAP 3 TIMES", -1: "SLAM THE DESK",
-         -2: "SCRATCH MY HEAD", -3: "TYPE ON KEYBOARD"}
-SLAM, SCRATCH, TYPE = -1, -2, -3
+         -2: "SCRATCH MY HEAD", -3: "TYPE ON KEYBOARD", -4: "MOVE ME AROUND"}
+SLAM, SCRATCH, TYPE, MOVE = -1, -2, -3, -4
+CONTEXT_INTRO = {"desk": ("PUT ME ON THE DESK", "and let go"),
+                 "hand": ("HOLD ME IN YOUR HAND", "tilted, keep holding")}
 
 
 def open_port(port, baud):
@@ -80,6 +82,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--slam", action="store_true", help="tap once vs slam the desk, to tell them apart")
     ap.add_argument("--scratch", action="store_true", help="scratching the head vs typing vs taps")
+    ap.add_argument("--context", action="store_true", help="every gesture on the desk and in your hand")
     args = ap.parse_args()
 
     try:
@@ -115,8 +118,12 @@ def main():
     mic = state[-1].endswith(",1")
     print(f"tapdebug on, microphone {'working' if mic else 'NOT working (IMU only)'}")
 
-    trials = []
-    if args.scratch:
+    trials, ctxs = [], []
+    if args.context:
+        for ctx, block in (("desk", [1, 2, 3, SCRATCH, SLAM, 0]), ("hand", [1, 2, 3, SCRATCH, 0, MOVE])):
+            trials += block
+            ctxs += [ctx] * len(block)
+    elif args.scratch:
         trials = [SCRATCH, TYPE, SCRATCH, 0, SCRATCH, 1, TYPE, SCRATCH]
     elif args.slam:
         for _ in range(max(args.rounds, 4)):
@@ -126,18 +133,29 @@ def main():
             trials += [1, 2, 3]
         trials += [0, 0]  # baseline: hands off (the second one: type on your keyboard)
 
+    if len(ctxs) != len(trials):
+        ctxs = ["desk"] * len(trials)
     print("Watch the pet's screen and do what it says.\n")
     for i, n in enumerate(trials):
+        if args.context and (i == 0 or ctxs[i] != ctxs[i - 1]):
+            pet.phase, pet.trial = "intro", -1
+            pet.say(*CONTEXT_INTRO[ctxs[i]])
+            print(f"== {CONTEXT_INTRO[ctxs[i]][0]} ==")
+            pet.pump(7.0)
         hint = "type on keyboard" if n == 0 and i == len(trials) - 1 and not args.scratch else ""
         if n == SCRATCH:
             hint = "keep going 4 s"
+        elif n == MOVE:
+            hint = "slowly, no taps"
+        elif n == 0 and args.context and ctxs[i] == "hand":
+            hint = "just hold still"
         pet.phase, pet.trial = "ready", i
         pet.say(f"{i + 1}/{len(trials)} get ready", WORDS[n].lower())
         print(f"[{i + 1}/{len(trials)}] get ready: {WORDS[n]} {hint}")
         pet.pump(2.0)
         pet.phase = "go"
         pet.say(f">> {WORDS[n]} <<", hint or "now!")
-        pet.pump(4.0 if args.scratch else 3.5)
+        pet.pump(4.0 if (args.scratch or args.context) else 3.5)
         pet.phase = "after"
         pet.say("ok, hands off", "")
         pet.pump(1.5)
@@ -174,6 +192,9 @@ def main():
                     for flag, idx in (("held", 5), ("shaking", 6), ("falling", 7), ("sound", 8)):
                         if p[idx] == "1":
                             d["flags"].add(flag)
+                    if len(p) >= 11:
+                        d.setdefault("gyro", []).append(float(p[9]))
+                        d.setdefault("surface", []).append(p[10] == "1")
                 elif p[0] == "K":
                     d["kicks"].append((int(p[1]), float(p[2])))
                     if len(p) >= 6:
@@ -196,8 +217,11 @@ def main():
     print("\n#  asked detected  heard  jolts  click loudness            jolt size (g)        result")
     tap_imu, tap_mic, ok = [], [], 0
     for i, (n, d) in enumerate(zip(trials, data)):
+        clean = d["taps"] == 0 and "bump" not in d["events"] and "scratch_start" not in d["events"]
         if n == SLAM:
             good = d["taps"] == 0 and "bump" in d["events"]
+        elif n in (0, MOVE):
+            good = clean
         elif n == SCRATCH:
             good = d["taps"] == 0 and "scratch_start" in d["events"]
         elif n == TYPE:
@@ -216,6 +240,13 @@ def main():
                 notes.append(f"{d['events'].count(ev)} {ev.replace('click_', 'click ')}")
         if d["flags"]:
             notes.append("while " + "/".join(sorted(d["flags"])))
+        if args.context and (i == 0 or ctxs[i] != ctxs[i - 1]):
+            print(f"--- {ctxs[i]} ---")
+        if d.get("surface"):
+            notes.append(f"surface {100 * sum(d['surface']) / len(d['surface']):.0f}%, gyro {statistics.median(d['gyro']):.1f} dps")
+        for ev in ("bump", "scratch_start"):
+            if ev in d["events"] and n not in (SLAM, SCRATCH):
+                notes.append(ev)
         print(f"{i + 1:<2} {n:^5} {d['taps']:^8} {len(clicks):^6} {len(kicks):^6} "
               f"{', '.join(f'{v:.0f}' for v in clicks[:4]):<25} {', '.join(f'{v:.2f}' for v in kicks[:4]):<20} "
               f"{'OK' if good else 'MISS'} {'; '.join(notes)}")

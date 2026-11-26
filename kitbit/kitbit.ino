@@ -582,7 +582,10 @@ bool tapDebug = false;  // "tapdebug": raw tap data at 100 Hz for tools/tap_test
 #if ENABLE_MIC
 void micTask(void *) {
   static int32_t buf[128];  // 8 ms at 16 kHz
-  float prevX = 0, hp = 0, bg = 0;
+  float prevX = 0, hp = 0, prevHp = 0, hf = 0, bg = 0;
+  // Second high-pass at ~1.5 kHz: taps and fingernail scratches are sharp and high,
+  // voices, footsteps and desk thuds are mostly low.
+  static const float HF_A = 1.0f / (1.0f + 2.0f * PI * 1500.0f / 16000.0f);
   bool armed = true, checked = false;
   uint32_t calmSince = 0, lastSound = 0, good = 0, total = 0, start = millis();
   for (;;) {
@@ -605,9 +608,11 @@ void micTask(void *) {
       float peak = 0;
       for (size_t k = j; k < j + 32 && k < n; k++) {
         float x = (float)(buf[k] >> 8);         // 24-bit sample
-        hp = x - prevX + 0.95f * hp;            // high-pass: drop DC and rumble, keep the click
+        hp = x - prevX + 0.95f * hp;            // high-pass: drop DC and rumble
         prevX = x;
-        if (fabsf(hp) > peak) peak = fabsf(hp);
+        hf = HF_A * (hf + hp - prevHp);         // keep only the high, sharp part
+        prevHp = hp;
+        if (fabsf(hf) > peak) peak = fabsf(hf);
       }
       if (bg <= 0) bg = peak;
       if (peak > micPeakMax) micPeakMax = peak;
@@ -664,13 +669,16 @@ bool imuCalibrated = false;
 float rawAcc[3], rawGyro[3];     // last sample in the sensor frame (gyro without bias correction)
 
 bool handling = false;  float handleScore = 0;
+// "On a surface" vs "in a hand": on something solid the pet doesn't rotate at all,
+// in a hand there is always a little tremor. Decides whether a ringing jolt can be a slam.
+bool onSurface = false;  float gyroAvg = 0;  uint32_t pickupMs = 0;
+bool hfReset = true;  // restart the IMU high-pass filter (after a FIFO reset)
 bool shaking = false;   float shakeMeter = 0;  uint32_t shakeStartMs = 0;
 float dizzy = 0;
 bool falling = false;   uint8_t lowGCount = 0, normalCount = 0;  uint32_t fallStartMs = 0;
 uint8_t tapCount = 0;   float tapSide = 0;  uint32_t lastTapMs = 0, lastTapCandMs = 0;
 // The sensor fills its FIFO at 250 Hz; every step we look at all new samples for the biggest kick.
 bool fifoOk = true;  uint16_t fifoEmptySteps = 0;
-float fifoGrav[3] = {0, 0, 1};  bool fifoGravInit = false;  // sensor-frame gravity, tracked at 250 Hz
 float tapPeak = 0;  // biggest kick since the last "imu" line
 uint32_t deskActiveUntil = 0;
 Orient orient = OR_UPRIGHT, prevOrient = OR_UPRIGHT, orientCand = OR_UPRIGHT;
@@ -845,6 +853,7 @@ void imuMeasureGyroBias() {
 }
 
 void imuFifoReset() {
+  hfReset = true;
   imuWrite(0x6A, 0x00);  // USER_CTRL: FIFO off
   imuWrite(0x23, 0x08);  // FIFO_EN: accelerometer only
   imuWrite(0x6A, 0x04);  // reset FIFO
@@ -861,6 +870,7 @@ bool slamPending = false;
 // Plain jolt log for the face-down "switch off" double tap: face down on the desk every
 // tap rings like a slam, so the normal tap logic (mic click + non-ringing jolt) can't be used.
 uint32_t joltLog[4];  volatile uint32_t joltLogCount = 0;
+bool offTest = false;  // "offtest": log the face-down double tap instead of switching off
 
 // Drains the whole FIFO (250 Hz) and returns the biggest kick away from gravity (g),
 // with its direction in the sensor frame. Returns -1 if nothing was read.
@@ -888,9 +898,18 @@ float imuFifoPeak(float dir[3]) {
         if (++bad > 2) { imuFifoReset(); return peak > 0 ? peak : -1; }
         continue;
       }
-      if (!fifoGravInit) { memcpy(fifoGrav, s, sizeof s); fifoGravInit = true; }
+      // High-pass (~HF_CUTOFF_HZ): keep the sharp spike of a tap, drop gravity, tilting
+      // and the slow movements of a hand.
+      static float hfPrev[3], hfOut[3];
+      static const float A = 1.0f / (1.0f + 2.0f * PI * HF_CUTOFF_HZ * 0.004f);
+      if (hfReset) { memcpy(hfPrev, s, sizeof s); memset(hfOut, 0, sizeof hfOut); hfReset = false; }
       float d[3], m = 0;
-      for (int k = 0; k < 3; k++) { d[k] = s[k] - fifoGrav[k]; m += d[k] * d[k]; fifoGrav[k] += d[k] * 0.01f; }
+      for (int k = 0; k < 3; k++) {
+        hfOut[k] = A * (hfOut[k] + s[k] - hfPrev[k]);
+        hfPrev[k] = s[k];
+        d[k] = hfOut[k];
+        m += d[k] * d[k];
+      }
       m = sqrtf(m);
       if (m > peak) { peak = m; memcpy(dir, d, sizeof d); }
       uint32_t t = now - (uint32_t)(total - 1 - (done + i)) * 4;  // 4 ms per sample
@@ -918,15 +937,16 @@ float imuFifoPeak(float dir[3]) {
         lastAbove = t;
       }
       static bool joltArmed = true;
-      static uint32_t joltCalm = 0;
-      if (joltArmed && m > OFF_TAP_G) {
+      static uint32_t joltCalm = 0, joltSound = 0;
+      if (soundPlaying) joltSound = t;  // our own buzzer shakes the case: not a tap
+      if (joltArmed && m > HIDE_TAP_G && t - joltSound > 150) {
         joltArmed = false;
         joltCalm = 0;
         joltLog[joltLogCount % 4] = t;
         joltLogCount = joltLogCount + 1;
         if (tapDebug) Serial.printf("E,%lu,jolt,%.2f\n", (unsigned long)t, m);
       } else if (!joltArmed) {  // re-arm once it has been calm for 60 ms (the desk may ring)
-        if (m < OFF_TAP_G * 0.5f) {
+        if (m < HIDE_TAP_G * 0.5f) {
           if (!joltCalm) joltCalm = t;
           if (t - joltCalm >= 60) joltArmed = true;
         } else {
@@ -935,7 +955,7 @@ float imuFifoPeak(float dir[3]) {
       }
       if (hitOpen && t - hitStart > SLAM_RING_TO_MS) {
         hitOpen = false;
-        bool slam = hitRings && hitPeak > SLAM_MIN_G;
+        bool slam = hitRings && hitPeak > SLAM_MIN_G && onSurface;  // in a hand there's no desk to slam
         kickVerdict[hitSlot] = slam ? HIT_SLAM : HIT_TAP;
         if (slam && !soundPlaying) slamPending = true;
         if (tapDebug) Serial.printf("H,%lu,%s,%.2f\n", (unsigned long)hitStart, slam ? "slam" : "tap", hitPeak);
@@ -1019,8 +1039,17 @@ void imuStep() {
   // --- being held / carried ---
   bool moving = gyroMag > HANDLE_GYRO_DPS || dynMag > 0.12f;
   handleScore += ((moving ? 1.0f : 0.0f) - handleScore) * 0.05f;
-  if (!handling && handleScore > 0.45f) { handling = true; ev.pickup = true; tapCount = 0; }
+  if (!handling && handleScore > 0.45f) { handling = true; ev.pickup = true; tapCount = 0; pickupMs = now; }
   else if (handling && handleScore < 0.08f) { handling = false; ev.putdown = true; }
+
+  // --- on a surface or in a hand? ---
+  gyroAvg += (gyroMag - gyroAvg) * 0.05f;
+  static uint32_t calmSince = 0, restlessSince = 0;
+  if (gyroAvg < SURFACE_GYRO_DPS) { restlessSince = 0; if (!calmSince) calmSince = now; }
+  else { calmSince = 0; if (!restlessSince) restlessSince = now; }
+  if (!onSurface && calmSince && now - calmSince > 1000) onSurface = true;
+  // A tap on the desk rotates the pet for a moment: only leave "surface" if it lasts.
+  if (onSurface && gyroAvg > SURFACE_GYRO_DPS * 2 && restlessSince && now - restlessSince > 300) onSurface = false;
 
   // --- shaking ---
   shakeMeter = shakeMeter * 0.97f + (dynMag > SHAKE_G ? dynMag * 0.05f : 0.0f);
@@ -1059,7 +1088,10 @@ void imuStep() {
   // only count once the sensor has calmed down again (below half the threshold).
   static bool tapArmed = true;
   if (!tapArmed && tapG < TAP_G * 0.5f && now - lastTapCandMs > TAP_DEBOUNCE_MS) tapArmed = true;
-  if (tapArmed && quietSpeaker && !handling && !falling && !shaking) {
+  // Taps count in any position, desk or hand; only being swung / shaken / dropped /
+  // just grabbed blocks them.
+  bool tapBlocked = falling || shaking || gyroMag > TAP_MAX_GYRO_DPS || now - pickupMs < PICKUP_IGNORE_MS;
+  if (tapArmed && quietSpeaker && !tapBlocked) {
     if (tapG > BUMP_G) {
       ev.bump = true;
       if (tapDebug) Serial.printf("E,%lu,bump\n", (unsigned long)now);
@@ -1076,9 +1108,9 @@ void imuStep() {
 
   // With the mic: a tap = a sharp click it heard + a (tiny) jolt of the pet itself,
   // at the same moment. Clicks without a jolt (typing, claps) are ignored.
-  if (tapDebug) {  // S,ms,imu kick (g),mic peak,mic background,handling,shaking,falling,sound
-    Serial.printf("S,%lu,%.3f,%.0f,%.0f,%d,%d,%d,%d\n", (unsigned long)now, tapG, micPeakDbg, micBg,
-                  handling, shaking, falling, soundPlaying);
+  if (tapDebug) {  // S,ms,imu kick (g, fast part),mic peak,mic background,handling,shaking,falling,sound,gyro avg,surface
+    Serial.printf("S,%lu,%.3f,%.0f,%.0f,%d,%d,%d,%d,%.1f,%d\n", (unsigned long)now, tapG, micPeakDbg, micBg,
+                  handling, shaking, falling, soundPlaying, gyroAvg, onSurface);
     micPeakDbg = 0;
   }
   // Every mic click waits (up to ~200 ms, the sensor may be read late) for a jolt
@@ -1091,7 +1123,7 @@ void imuStep() {
   }
   if (slamPending) {  // the desk rang: someone slammed it
     slamPending = false;
-    if (!handling && !falling && !shaking) {
+    if (!falling && !shaking) {
       ev.bump = true;
       tapCount = 0;
       if (tapDebug) Serial.printf("E,%lu,bump\n", (unsigned long)now);
@@ -1112,7 +1144,7 @@ void imuStep() {
       if (hit == HIT_TAP || hit == HIT_SLAM || expired) {
         if (hit == HIT_SLAM) {
           if (tapDebug) Serial.printf("E,%lu,click_slam\n", (unsigned long)now);  // part of the slam, not a tap
-        } else if (jolted && !handling && !falling && !shaking) {
+        } else if (jolted && !tapBlocked) {
           tapCount++;
           tapSide += side;
           lastTapMs = now;
@@ -1138,13 +1170,13 @@ void imuStep() {
       bool scratchy = micPeakWin > micBg * SCRATCH_MIC_RATIO && winImu > SCRATCH_IMU_G;
       scratchBits = ((scratchBits << 1) | scratchy) & 0x3FF;
       int n = __builtin_popcount(scratchBits);
-      if (!scratching && n >= SCRATCH_START_OF_10 && !handling && !shaking && !falling) {
+      if (!scratching && n >= SCRATCH_START_OF_10 && !shaking && !falling) {
         scratching = true;
         scratchStartMs = now;
         ev.scratchStart = true;
         tapCount = 0;  // those "taps" were the scratching
         if (tapDebug) Serial.printf("E,%lu,scratch_start\n", (unsigned long)now);
-      } else if (scratching && (n <= SCRATCH_STOP_OF_10 || handling || shaking)) {
+      } else if (scratching && (n <= SCRATCH_STOP_OF_10 || shaking || falling)) {
         scratching = false;
         scratchEndMs = now;
         ev.scratchEnd = true;
@@ -1175,7 +1207,8 @@ void imuStep() {
     }
   }
   if (tapCount && now - lastTapMs > TAP_WINDOW_MS && !scratchSuspect) {
-    if (!handling) { ev.taps = tapCount; ev.tapSide = tapSide; }
+    ev.taps = tapCount;
+    ev.tapSide = tapSide;
     if (tapDebug) Serial.printf("E,%lu,taps,%d\n", (unsigned long)now, tapCount);
     tapCount = 0;
     tapSide = 0;
@@ -1434,6 +1467,7 @@ void onScratchEnd(uint32_t ms) {
 
 // Face down + double tap = switch off. It can't be seen, so it sings goodnight.
 void switchOffFromHiding() {
+  if (offTest) { Serial.printf("E,%lu,would_switch_off\n", (unsigned long)millis()); return; }
   Serial.println(F("[power] face down + double tap: goodnight"));
   hidingQuiet = false;
   say(SND_GOODNIGHT, 1, true);
@@ -2485,8 +2519,16 @@ static bool offListenForDoubleTap() {
     if (imuRead(0x3B, b, 6)) {
       float s[3], d[3], m = 0;
       for (int k = 0; k < 3; k++) s[k] = (int16_t)(b[k * 2] << 8 | b[k * 2 + 1]) / 8192.0f;
-      if (!haveG) { memcpy(g, s, sizeof g); haveG = true; }
-      for (int k = 0; k < 3; k++) { d[k] = s[k] - g[k]; m += d[k] * d[k]; g[k] += d[k] * 0.02f; }
+      static float hfPrev[3], hfOut[3];
+      static const float A = 1.0f / (1.0f + 2.0f * PI * HF_CUTOFF_HZ * 0.005f);  // ~200 Hz here
+      if (!haveG) { memcpy(g, s, sizeof g); memcpy(hfPrev, s, sizeof s); memset(hfOut, 0, sizeof hfOut); haveG = true; }
+      for (int k = 0; k < 3; k++) {
+        g[k] += (s[k] - g[k]) * 0.02f;  // slow gravity, for "put face down again"
+        hfOut[k] = A * (hfOut[k] + s[k] - hfPrev[k]);
+        hfPrev[k] = s[k];
+        d[k] = hfOut[k];
+        m += d[k] * d[k];
+      }
       m = sqrtf(m);
       uint32_t now = millis();
       if (armed && m > OFF_TAP_G) {
@@ -2589,6 +2631,7 @@ void runCommand(String cmd) {
   if (cmd == "help") printHelp();
   else if (cmd == "status") printStatus();
   else if (cmd == "imu") { imuStream = !imuStream; }
+  else if (cmd == "offtest") { offTest = !offTest; Serial.printf("I,offtest,%d\n", offTest); }
   else if (cmd == "tapdebug") { tapDebug = !tapDebug; Serial.printf("I,tapdebug,%d,mic,%d\n", tapDebug, micOk); }
   else if (cmd.startsWith("prompt")) {  // prompt <line1>|<line2>  (empty = clear)
     static char p1[22], p2[22];

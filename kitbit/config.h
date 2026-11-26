@@ -73,20 +73,29 @@
 #define TAP_SOURCE         1       // 0 = IMU only, 1 = mic click + IMU jolt together (best), 2 = mic only
 #define MIC_CLICK_RATIO    6.0f    // a click is this many times louder than the background
 #define MIC_CLICK_MIN      8000.0f // ...and at least this loud (watch "mic" on serial to tune)
-#define TAP_CONFIRM_G      0.05f   // the tiny IMU jolt that confirms a mic click was on the pet
+// All IMU jolt sizes below are measured on the FAST part of the motion only (above
+// ~20 Hz): a tap is a sharp spike, moving / tilting / holding the pet is slow and is
+// filtered out, so the same numbers work on a desk and in your hand.
+#define HF_CUTOFF_HZ       20.0f
+#define TAP_CONFIRM_G      0.04f   // the tiny IMU jolt that confirms a mic click was on the pet
 #define TAP_MATCH_MS       150     // click and jolt must be this close in time (measured: usually <35 ms, seen 115)
 // Tap or desk slam? Measured: after a slam the desk keeps the pet shaking for ~70-85 ms,
 // after a finger tap the jolt is gone at once. So a jolt that is still above SLAM_RING_G
 // SLAM_RING_FROM_MS after it started (checked until SLAM_RING_TO_MS) was a slam.
-#define SLAM_RING_G        0.10f
+#define SLAM_RING_G        0.06f
 #define SLAM_RING_FROM_MS  45
 #define SLAM_RING_TO_MS    130
-#define SLAM_MIN_G         0.30f   // and it has to be at least this big
+#define SLAM_MIN_G         0.20f   // and it has to be at least this big
+// Slams only exist when it stands on something solid. "On a surface" = almost no
+// rotation at all (a hand always trembles a little). Average gyro below this:
+#define SURFACE_GYRO_DPS   2.5f
+#define TAP_MAX_GYRO_DPS   150.0f  // turning faster than this = being swung around, not tapped
+#define PICKUP_IGNORE_MS   700     // grabbing it makes clicks and jolts too
 
 // Head scratches: measured per 100 ms window, scratching = mic 7-15x louder than the room
 // and the pet vibrating ~0.04 g in 65-85 % of windows; typing / taps: under 10 %.
 #define SCRATCH_MIC_RATIO  4.0f    // a window is "scratchy" if the mic is this much louder than the room...
-#define SCRATCH_IMU_G      0.03f   // ...and the pet itself vibrates at least this much
+#define SCRATCH_IMU_G      0.02f   // ...and the pet itself vibrates at least this much (fast part)
 #define SCRATCH_START_OF_10 6      // scratchy windows out of the last 10 (1 s) to start purring
 #define SCRATCH_STOP_OF_10  2      // ...and to stop
 #define TAP_WINDOW_MS      450     // taps closer than this are grouped (double / triple tap)
@@ -159,7 +168,8 @@
 #define OFF_CHECK_S        2       // how often the sleeping pet checks whether it was moved
 #define OFF_WAKE_DEG       30.0f   // that much turning makes it listen for the double tap
 #define OFF_LISTEN_MS      6000    // how long it listens (screen hint on) before sleeping again
-#define OFF_TAP_G          0.15f   // jolt that counts as a tap while it is listening (IMU only)
+#define OFF_TAP_G          0.10f   // jolt that counts as a tap while it is listening (IMU only)
+#define HIDE_TAP_G         0.06f   // face down a tap on its back is soft
 
 // ---------------- Memory -------------------------------------------------
 #define REMEMBER_MOOD      1       // keep happiness/energy/age in flash across power cycles
