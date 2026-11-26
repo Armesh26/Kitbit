@@ -28,8 +28,11 @@ struct EarsState {          // read by the pet (written by the mic task)
   int8_t songPc[3] = {-1, -1, -1};  // the 3 notes (pitch classes) the song played most over ~6 s
   int8_t key = -1;          // 0 = C .. 11 = B
   bool keyMinor = false;
-  int8_t chord = -1;        // root of the current chord
+  int8_t chord = -1;        // root of the current chord (raw, every 128 ms)
   bool chordMinor = false;
+  int8_t bass = -1;         // stable chord root: only chords of the key, clear winner, held ~0.25 s (-1 = unsure)
+  bool bassMinor = false;
+  uint32_t bassChanges = 0; // counts chord changes
   bool pitch = false;       // a steady single pitch (whistle / hum) right now
   float pitchMidi = 0;
   uint8_t pitchKind = 0;    // 1 = whistle, 2 = hum
@@ -57,6 +60,7 @@ class Ears {
     musicHist = 0;
     st.music = false;
     st.beatAvg = 0;
+    st.bass = -1;
     st.pitch = false;
   }
 
@@ -91,6 +95,10 @@ class Ears {
   bool dirty = false, blockDirty = false;
   float chromaLong[12] = {0}, chromaShort[12] = {0};
   float chromaKey[12] = {0};  // ~6 s: music keeps its key, talking averages out to "no key"
+  float chromaBeat[12] = {0}; // ~0.5 s: for the stable chord
+  int8_t bassCand = -1;
+  bool bassCandMinor = false;
+  int bassCandN = 0;
   int keyChallenge = 0;
   // onsets
   float onset[ON];
@@ -222,6 +230,7 @@ class Ears {
       chromaLong[k] += (c[k] - chromaLong[k]) * 0.08f;  // ~1.6 s
       chromaKey[k] += (c[k] - chromaKey[k]) * 0.021f;   // ~6 s
       chromaShort[k] += (c[k] - chromaShort[k]) * 0.5f; // ~0.25 s
+      chromaBeat[k] += (c[k] - chromaBeat[k]) * 0.25f;  // ~0.5 s, about a beat
       mx = max(mx, chromaShort[k]);
     }
     if (nb > 0) { secSteady += dot / sqrtf(na * nb); secSteadyN++; }
@@ -231,6 +240,7 @@ class Ears {
     secTonalN++;
     findKey();
     findChord();
+    findBassChord();
   }
 
   void findKey() {
@@ -280,6 +290,32 @@ class Ears {
         float sc = chromaShort[r] + chromaShort[(r + (m ? 3 : 4)) % 12] + chromaShort[(r + 7) % 12];
         if (sc > best) { best = sc; st.chord = r; st.chordMinor = m; }
       }
+  }
+
+  // The 6 chords that belong to the key (major: I ii iii IV V vi; minor: i III iv v VI VII),
+  // scored on ~0.5 s of audio. Changes only when a new chord clearly wins twice in a row.
+  void findBassChord() {
+    if (st.key < 0) return;
+    static const int8_t MAJ_DEG[6] = {0, 2, 4, 5, 7, 9}, MAJ_MIN[6] = {0, 1, 1, 0, 0, 1};
+    static const int8_t MIN_DEG[6] = {0, 3, 5, 7, 8, 10}, MIN_MIN[6] = {1, 0, 1, 1, 0, 0};
+    const int8_t *deg = st.keyMinor ? MIN_DEG : MAJ_DEG, *mn = st.keyMinor ? MIN_MIN : MAJ_MIN;
+    float best = -1, second = -1;
+    int bestI = 0;
+    for (int i = 0; i < 6; i++) {
+      int r = (st.key + deg[i]) % 12;
+      float in = chromaBeat[r] + 0.8f * chromaBeat[(r + (mn[i] ? 3 : 4)) % 12] + 0.8f * chromaBeat[(r + 7) % 12];
+      if (in > best) { second = best; best = in; bestI = i; }
+      else if (in > second) second = in;
+    }
+    if (best - second < BASS_MARGIN) { bassCandN = 0; return; }  // no clear winner: keep what we had
+    int8_t r = (st.key + deg[bestI]) % 12;
+    bool m = mn[bestI];
+    if (r == st.bass && m == st.bassMinor) { bassCandN = 0; return; }
+    if (r == bassCand && m == bassCandMinor) {
+      if (++bassCandN >= 2) { st.bass = r; st.bassMinor = m; st.bassChanges = st.bassChanges + 1; bassCandN = 0; }
+    } else {
+      bassCand = r; bassCandMinor = m; bassCandN = 1;
+    }
   }
 
   void onsetFrame(uint32_t now) {

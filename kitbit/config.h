@@ -202,6 +202,12 @@
 #define HUM_NOTE_MS        700     // weaker beat: hums freely, one note every this long...
 #define HUM_PHRASE         3       // ...this many notes, then one pause to keep listening
 #define SING_BASE_MIDI     88      // E6: the buzzer sounds best ~1.3-2.7 kHz (it resonates ~2.6/3.6 kHz)
+// Bass along: plucks the ROOT of the current chord. Clear beat: on beats 1 and 3;
+// weak beat: whenever the chord changes. Only chords of the detected key, and only
+// when one chord clearly wins - otherwise it stays quiet.
+#define BASS_ALONG         1
+#define BASS_NOTE_MS       120
+#define BASS_MARGIN        0.03f   // how clearly the best chord must beat the next one
 #define REPEAT_AFTER_ME    0       // 1 = whistle / hum a short tune and it plays it back
 // Someone singing / humming also makes it dance: share of the last second spent on held
 // notes (a pitch kept within half a semitone for SUNG_HOLD_MS); talking glides, ~0.

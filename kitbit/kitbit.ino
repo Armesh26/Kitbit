@@ -1605,6 +1605,15 @@ bool repeatBusy() {
 
 bool beatClear() { return ears.st.beatAvg >= SING_MIN_BEAT; }
 
+// Pluck the root of the current (stable) chord, in the buzzer's clear range.
+void playBass() {
+#if BASS_ALONG
+  if (ears.st.bass < 0 || chattiness < 2 || muted) return;
+  int midi = SING_BASE_MIDI + ((ears.st.bass - SING_BASE_MIDI) % 12 + 12) % 12;
+  sayNote(midi, BASS_NOTE_MS, 2);
+#endif
+}
+
 // One note from the song's own 3 strongest notes: step = position in a low-mid-high-mid walk.
 void singSongNote(int step, uint32_t ms) {
 #if SING_ALONG
@@ -1632,6 +1641,9 @@ void onBeat(uint32_t n, uint32_t period) {
   // itself played most (always in key), up in the buzzer's sweet spot, walking up and down.
   int bar = (n / 4) % (SING_BARS_ON + SING_BARS_OFF), beat = n % 4;
   if (bar < SING_BARS_ON) singSongNote(beat, min<uint32_t>(period * 55 / 100, 260));
+#endif
+#if BASS_ALONG
+  if (n % 2 == 0) playBass();  // beats 1 and 3 of the bar
 #endif
 }
 
@@ -1672,6 +1684,14 @@ void musicStep() {
       humStep++;
       nextSway = now + HUM_NOTE_MS;
     }
+#if BASS_ALONG
+    // no clear beat: pluck the root whenever the chord changes
+    static uint32_t seenChanges = 0, lastPluck = 0;
+    if (ears.st.bassChanges != seenChanges) {
+      seenChanges = ears.st.bassChanges;
+      if (now - lastPluck > 400) { playBass(); lastPluck = now; }
+    }
+#endif
     return;
   }
   uint32_t period = ears.st.beatMs, last = ears.st.lastBeat;
@@ -3078,10 +3098,11 @@ void serialStep() {
   if (earsStream && since(lastEarsPrint) > 500) {
     lastEarsPrint = millis();
     static const char *NN[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f/%.2f tonal=%.2f steady=%.2f keyfit=%.2f sung=%.2f sing=%d bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
+    Serial.printf("ears music=%d loud=%4.1fdB cont=%.2f beat=%.2f/%.2f tonal=%.2f steady=%.2f keyfit=%.2f sung=%.2f sing=%d bpm=%5.1f key=%s%s chord=%s%s bass=%s%s pitch=%s%.1f\n",
                   ears.st.music, ears.st.loudAvg, ears.st.continuity, ears.st.beatStrength, ears.st.beatAvg, ears.st.tonalAvg, ears.st.steady, ears.st.keyCorr, ears.st.sung, ears.st.singing, ears.st.bpm,
                   ears.st.key >= 0 ? NN[ears.st.key] : "-", ears.st.keyMinor ? "m" : "",
                   ears.st.chord >= 0 ? NN[ears.st.chord] : "-", ears.st.chordMinor ? "m" : "",
+                  ears.st.bass >= 0 ? NN[ears.st.bass] : "-", ears.st.bassMinor ? "m" : "",
                   ears.st.pitch ? (ears.st.pitchKind == 1 ? "whistle " : "hum ") : "-", ears.st.pitch ? ears.st.pitchMidi : 0.0f);
   }
   static uint32_t lastMicPrint = 0;
