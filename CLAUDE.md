@@ -75,6 +75,7 @@ First check that the 5V pin reads about 0 V when the board runs on battery alone
   - the optional `PIN_USB_SENSE`
   - every 4th check, a 300 ms look for a *new* USB host, via the start-of-frame counter in `USB_SERIAL_JTAG_FRAM_NUM_REG`
   The flip + double-tap wake (`offListenForDoubleTap()`) is still in the code behind `OFF_WAKE_BY_TAP`.
+- **Face down (`ACT_HIDING`) is power save, not off.** `powerSaveStep()` takes over `loop()`. It pauses the mic task (`micPauseReq`, which calls `i2s.end()`), drops the CPU to 80 MHz, and light-sleeps for `PS_WAKE_MS` between steps. The IMU FIFO keeps recording, so the face-down double tap still works. When `acc.z > -0.5` for 2 steps it calls `exitPowerSave()`, and `psHoldoffUntil` keeps it at full speed for 3 s while the orientation change registers. `AUTO_OFF_FACEDOWN_MIN` is 0, because face up has to be able to wake it.
 - **Below `BATT_SHUTDOWN_V` (3.3 V) for 20 s**, it goes into a protective deep sleep and checks every 60 s for a charger.
 - **`offModeCheck()`** runs first in `setup()` and returns to sleep quickly when there is no reason to wake.
 

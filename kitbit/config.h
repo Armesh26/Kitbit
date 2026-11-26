@@ -164,7 +164,12 @@
 // ---------------- Power off -------------------------------------------------
 // "Off" = deep sleep with the screen and motion sensor powered down.
 // It wakes up when you move / turn it (or press RESET, or plug in a charger).
-#define AUTO_OFF_FACEDOWN_MIN 5    // on battery: lying face down this long = switch off (0 = never)
+#define AUTO_OFF_FACEDOWN_MIN 0    // 0 = never: face down is the low-power mode that face-up wakes (see below)
+
+// Face down = power save: screen + mic off, CPU at 80 MHz in light sleep, waking every
+// PS_WAKE_MS to read the motion sensor (its FIFO keeps recording meanwhile). Turned face
+// up -> everything is back within ~0.4 s. Face down + double tap -> really off (deep sleep).
+#define PS_WAKE_MS         200
 // Switching off by hand: put it face down and double-tap it.
 // Switching back on: plug in a charger / USB (or press RESET).
 // OFF_WAKE_BY_TAP 1 also allows: turn it over -> "tap tap to wake" -> double tap.

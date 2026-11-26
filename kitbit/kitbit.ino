@@ -571,6 +571,7 @@ void confusedEyes() { BusLock lock; eyes.anim_confused(); }
 I2SClass i2s;
 #endif
 volatile bool micOk = false;
+volatile bool micPauseReq = false, micPaused = false;  // face-down power save switches the mic off
 volatile uint32_t micClickCount = 0;
 volatile uint32_t micClickTimes[8];  volatile float micClickPeaks[8];  // last 8 clicks, exact time
 volatile float micBg = 0, micPeakMax = 0;  // for the "mic" serial stream
@@ -590,6 +591,17 @@ void micTask(void *) {
   bool armed = true, checked = false;
   uint32_t calmSince = 0, lastSound = 0, good = 0, total = 0, start = millis();
   for (;;) {
+    if (micPauseReq) {  // power save: stop the clock, the INMP441 then sleeps by itself
+      if (!micPaused) { i2s.end(); micPaused = true; }
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    if (micPaused) {
+      micStartI2S();
+      micPaused = false;
+      armed = true;
+      calmSince = 0;
+    }
     size_t n = i2s.readBytes((char *)buf, sizeof buf) / 4;
     if (!n) { vTaskDelay(1); continue; }
     uint32_t now = millis();
@@ -641,10 +653,18 @@ void micTask(void *) {
 }
 #endif
 
+bool micStartI2S() {
+#if ENABLE_MIC
+  i2s.setPins(PIN_MIC_SCK, PIN_MIC_WS, -1, PIN_MIC_SD);
+  return i2s.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO, I2S_STD_SLOT_LEFT);
+#else
+  return false;
+#endif
+}
+
 void micBegin() {
 #if ENABLE_MIC && TAP_SOURCE > 0
-  i2s.setPins(PIN_MIC_SCK, PIN_MIC_WS, -1, PIN_MIC_SD);
-  if (!i2s.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO, I2S_STD_SLOT_LEFT)) {
+  if (!micStartI2S()) {
     Serial.println(F("Microphone: I2S failed to start - taps use the IMU only"));
     return;
   }
@@ -1490,6 +1510,46 @@ void hidingDoubleTapStep() {
     if (prev && t - prev >= 100 && t - prev <= 700) { prev = 0; switchOffFromHiding(); return; }
     prev = t;
   }
+}
+
+// ---- face down = power save ----
+bool powerSave = false;
+uint32_t psHoldoffUntil = 0;
+
+void enterPowerSave() {
+  powerSave = true;
+  micPauseReq = true;
+  vTaskDelay(pdMS_TO_TICKS(150));  // let the eyes task switch the screen off, the mic task stop
+  Serial.println(F("[power] face down: power save (screen + mic off, light sleep)"));
+  Serial.flush();
+  setCpuFrequencyMhz(80);
+}
+
+void exitPowerSave() {
+  setCpuFrequencyMhz(160);
+  powerSave = false;
+  micPauseReq = false;
+  imuRestart = true;  // gravity from the fresh samples: the face-up turn is seen at once
+  psHoldoffUntil = millis() + 3000;  // full speed while it notices it was turned over
+  Serial.println(F("[power] turned over: waking up"));
+}
+
+// One power-save step: read the sensor, check for "face up" and the switch-off double
+// tap, then light-sleep until the next one.
+void powerSaveStep() {
+  if (!powerSave) enterPowerSave();
+  imuStep();               // drains the FIFO: jolts for the face-down double tap
+  ev = MotionEvents();     // nothing else reacts while it hides
+  static uint8_t upCount = 0;
+  if (acc.z > -0.5f) upCount++;  // screen no longer facing down (body z = out of the screen)
+  else upCount = 0;
+  if (upCount >= 2) { upCount = 0; exitPowerSave(); return; }
+  hidingDoubleTapStep();   // may switch it off for real
+  static uint32_t lastSec = 0;
+  if (millis() - lastSec >= 1000) { lastSec = millis(); needsTick(); battStep(); }
+  serialStep();
+  esp_sleep_enable_timer_wakeup((uint64_t)PS_WAKE_MS * 1000ULL);
+  esp_light_sleep_start();
 }
 
 void onTaps(uint8_t n, float side) {
@@ -2820,6 +2880,13 @@ void setup() {
 void loop() {
   static uint32_t lastImu = 0, lastBrain = 0, lastNeeds = 0, lastAge = 0, lastSave = 0, lastTouch = 0;
   uint32_t now = millis();
+
+  // Face down: power save until it's turned over (or double-tapped off).
+  if (imuOk && activity == ACT_HIDING && !bootPending && !calStage && reached(psHoldoffUntil)) {
+    powerSaveStep();
+    return;
+  }
+  if (powerSave) exitPowerSave();  // left hiding some other way (serial "wake" ...)
 
   if (imuOk && now - lastImu >= 10) {  // ~100 Hz
     lastImu = now;
