@@ -117,7 +117,7 @@ class Ears {
   bool bassCandMinor = false;
   int bassCandN = 0;
   uint32_t lastBassChange = 0;
-  int keyChallenge = 0;
+  float keyAvg[24] = {0};
   // onsets
   float onset[ON];
   int onN = 0, onFill = 0, framesSinceTempo = 0;
@@ -264,8 +264,10 @@ class Ears {
   void findKey() {
     static const float MAJ[12] = {6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88};
     static const float MIN[12] = {6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17};
-    float best = -2, cur = -2;
-    int bestR = 0, bestM = 0;
+    // Every key's fit, smoothed over ~2.5 s; switch when another key is clearly better
+    // on average (a single first guess made in a quiet room must never stick).
+    float best = -2, bestAvg = -2;
+    int bestI = 0;
     for (int r = 0; r < 12; r++)
       for (int m = 0; m < 2; m++) {
         const float *p = m ? MIN : MAJ;
@@ -278,16 +280,13 @@ class Ears {
           num += a * b; dp += a * a; dc += b * b;
         }
         float corr = num / sqrtf(dp * dc + 1e-12f);
-        if (corr > best) { best = corr; bestR = r; bestM = m; }
-        if (r == st.key && m == (int)st.keyMinor) cur = corr;
+        int i = r * 2 + m;
+        keyAvg[i] += (corr - keyAvg[i]) * 0.05f;
+        if (corr > best) best = corr;
+        if (keyAvg[i] > bestAvg) { bestAvg = keyAvg[i]; bestI = i; }
       }
-    // Only change key when another one is clearly better for ~3 s (no flip-flopping
-    // between neighbours like D major / F# minor).
-    if (st.key < 0) { st.key = bestR; st.keyMinor = bestM; }
-    else if (bestR != st.key || bestM != (int)st.keyMinor) {
-      if (best > cur + 0.04f) { if (++keyChallenge >= 24) { st.key = bestR; st.keyMinor = bestM; keyChallenge = 0; } }
-      else keyChallenge = 0;
-    } else keyChallenge = 0;
+    int curI = st.key < 0 ? -1 : st.key * 2 + st.keyMinor;
+    if (curI < 0 || (bestI != curI && bestAvg > keyAvg[curI] + 0.02f)) { st.key = bestI / 2; st.keyMinor = bestI % 2; }
     st.keyCorr = max(0.0f, best);
     // the song's own strongest notes
     int8_t top[3] = {-1, -1, -1};
