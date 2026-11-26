@@ -1758,13 +1758,15 @@ bool battUsbSense() {
 // for a moment: with the divider fitted the voltage stays up, floating it collapses.
 bool battDividerFitted() {
 #if ENABLE_BATTERY
-  analogReadMilliVolts(PIN_BATTERY);  // attach the ADC first
+  uint32_t plain = analogReadMilliVolts(PIN_BATTERY);  // also attaches the ADC
   gpio_pulldown_en((gpio_num_t)PIN_BATTERY);
   delay(5);
-  uint32_t mv = analogReadMilliVolts(PIN_BATTERY);
+  uint32_t pulled = analogReadMilliVolts(PIN_BATTERY);
   gpio_pulldown_dis((gpio_num_t)PIN_BATTERY);
   delay(5);
-  return mv > 300;
+  Serial.printf("[batt] D0 reads %lu mV (%lu mV with pull-down) -> battery %.2f V\n",
+                (unsigned long)plain, (unsigned long)pulled, plain / 1000.0f * BATT_DIVIDER * BATT_CAL);
+  return pulled > 100;  // a floating pin collapses to ~0 with the pull-down, a divider doesn't
 #else
   return false;
 #endif
