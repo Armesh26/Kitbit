@@ -1653,7 +1653,14 @@ void musicStep() {
 #if ENABLE_EARS
   static const char *NOTE_NAMES[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t now = millis();
-  bool on = micOk && (ears.st.music || ears.st.singing) && activity == ACT_AWAKE && !calStage && !repeatBusy();
+  bool heard = micOk && (ears.st.music || ears.st.singing);
+  // Songs have stretches the detector doesn't like: while it's still hearing steady,
+  // continuous sound, keep dancing a while instead of stopping and restarting.
+  static uint32_t lastHeard = 0;
+  if (heard) lastHeard = now;
+  bool stillGoing = dancing && now - lastHeard < MUSIC_GRACE_MS &&
+                    ears.st.loudAvg > MUSIC_MIN_DB && ears.st.continuity > MUSIC_MIN_CONT;
+  bool on = (heard || stillGoing) && activity == ACT_AWAKE && !calStage && !repeatBusy();
   if (on && !dancing) {
     dancing = true;
     interact();

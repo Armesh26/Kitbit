@@ -442,9 +442,10 @@ class Ears {
 
   void decide(bool musical) {
     musicHist = ((musicHist << 1) | musical) & 0xFF;  // last 8 seconds
-    int n = __builtin_popcount(musicHist), recent = __builtin_popcount(musicHist & 0xF);
-    // Quiet for 2 s: the music has stopped, no need to wait for the slow evidence.
-    quietSecs = (st.loudAvg < MUSIC_MIN_DB * 0.6f || st.continuity < 0.5f) ? quietSecs + 1 : 0;
+    int n = __builtin_popcount(musicHist), recent = __builtin_popcount(musicHist & 0x3F);
+    // Really quiet for 2 s: the music has stopped, no need to wait for the slow evidence.
+    // (Soft passages are not silence: both nearly no level AND mostly pauses.)
+    quietSecs = (st.loudAvg < MUSIC_MIN_DB * 0.4f && st.continuity < 0.4f) ? quietSecs + 1 : 0;
     if (!st.music && n >= 5) st.music = true;
     else if (st.music && (recent <= 1 || quietSecs >= 2)) { st.music = false; musicHist = 0; }
   }
