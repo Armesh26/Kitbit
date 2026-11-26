@@ -1605,6 +1605,18 @@ bool repeatBusy() {
 
 bool beatClear() { return ears.st.beatAvg >= SING_MIN_BEAT; }
 
+// One note from the song's own 3 strongest notes: step = position in a low-mid-high-mid walk.
+void singSongNote(int step, uint32_t ms) {
+#if SING_ALONG
+  if (ears.st.songPc[2] < 0 || chattiness < 2 || muted) return;
+  int pcs[3];
+  for (int i = 0; i < 3; i++) pcs[i] = ((ears.st.songPc[i] - SING_BASE_MIDI) % 12 + 12) % 12;
+  std::sort(pcs, pcs + 3);  // low to high inside the octave above SING_BASE_MIDI
+  static const uint8_t walk[4] = {0, 1, 2, 1};
+  sayNote(SING_BASE_MIDI + pcs[walk[step % 4]], ms, 2);
+#endif
+}
+
 void onBeat(uint32_t n, uint32_t period) {
   glance((n % 2) ? 0.7f : -0.7f, -0.1f, period);  // sway left / right on the beat
   react(faceWith(HAPPY), period + 200);
@@ -1616,16 +1628,10 @@ void onBeat(uint32_t n, uint32_t period) {
   }
   if (n % 8 == 0) showOverlay(OV_NOTES, period * 4);
 #if SING_ALONG
-  // Hum along: one bar of singing, three bars of listening. Only the notes the song itself
-  // played most (so it's always in key), up in the buzzer's sweet spot, walking up and down.
-  int bar = (n / 4) % 4, beat = n % 4;
-  if (bar == 0 && ears.st.songPc[2] >= 0 && chattiness >= 2 && !muted) {
-    int pcs[3], k = 0;
-    for (int i = 0; i < 3; i++) pcs[k++] = ((ears.st.songPc[i] - SING_BASE_MIDI) % 12 + 12) % 12;
-    std::sort(pcs, pcs + 3);  // low to high inside the octave above SING_BASE_MIDI
-    static const uint8_t walk[4] = {0, 1, 2, 1};
-    sayNote(SING_BASE_MIDI + pcs[walk[beat]], min<uint32_t>(period * 55 / 100, 260), 2);
-  }
+  // Sing along: SING_BARS_ON bars singing, SING_BARS_OFF listening. Only the notes the song
+  // itself played most (always in key), up in the buzzer's sweet spot, walking up and down.
+  int bar = (n / 4) % (SING_BARS_ON + SING_BARS_OFF), beat = n % 4;
+  if (bar < SING_BARS_ON) singSongNote(beat, min<uint32_t>(period * 55 / 100, 260));
 #endif
 }
 
@@ -1651,14 +1657,17 @@ void musicStep() {
   if (!dancing) return;
   lastInteraction = now;  // music is company
   if (!beatClear()) {  // no clear beat: sway smoothly, don't pretend to know the beat
-    static uint32_t nextSway = 0;
+    // ...and hum along freely: a short phrase of the song's own notes, then a pause.
+    static uint32_t nextSway = 0, humStep = 0;
     static bool swayLeft = false;
     if (reached(nextSway)) {
       swayLeft = !swayLeft;
-      glance(swayLeft ? -0.6f : 0.6f, -0.1f, 1400);
-      react(faceWith(HAPPY), 1600);
+      glance(swayLeft ? -0.6f : 0.6f, -0.1f, HUM_NOTE_MS * 2);
+      react(faceWith(HAPPY), HUM_NOTE_MS * 2 + 200);
       if (overlay != OV_NOTES) showOverlay(OV_NOTES, 3000);
-      nextSway = now + 1400;
+      if (humStep % (HUM_PHRASE + 1) < HUM_PHRASE) singSongNote(humStep % (HUM_PHRASE + 1), HUM_NOTE_MS * 6 / 10);
+      humStep++;
+      nextSway = now + HUM_NOTE_MS;
     }
     return;
   }
