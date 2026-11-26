@@ -35,6 +35,8 @@
 #define EYE_GAP            14
 #define EYE_RADIUS         10
 #define EYE_WIDE_EXTRA     12      // extra height for "wide eyed" surprise
+#define EYE_MARGIN         4       // keep the eyes this far from the edges (curious eyes grow, wobbles shake)
+#define SCREEN_HIDDEN_BOTTOM 6     // rows at the bottom covered by the case: battery icon, text and eyes stay above
 
 // ---------------- MPU6050 axis mapping ----------------------------------
 // Body frame of the pet, seen from the front (looking at the screen):

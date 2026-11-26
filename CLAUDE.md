@@ -71,4 +71,5 @@ First check that the 5V pin reads about 0 V when the board runs on battery alone
 - **The core already defines `FAIL`**, which is why the diagnosis sketch uses `R_PASS`, `R_FAIL` and `R_CHECK`.
 - **Make sure CuteBuzzerSounds `bendTones()` always advances.** It steps with an int, so check that `freq * (step - 1) >= 1` at the low end of every bend; otherwise it loops forever.
 - **Keep text wrap off on the display.** Glyphs near the edge otherwise wrap to the other side.
+- **Keep things above the bottom rows hidden by the case.** `SCREEN_HIDDEN_BOTTOM` sets how many rows are covered. Place new bottom-of-screen elements relative to it. `keepEyesOnScreen()` clamps the eye position every frame.
 - **Commit messages end with** `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.

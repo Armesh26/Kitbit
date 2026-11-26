@@ -396,12 +396,12 @@ void drawOverlay() {
       }
       break;
     case OV_TEXT:
-      display.fillRect(0, 43, SCREEN_WIDTH, 21, OLED_BLACK);
+      display.fillRect(0, 43 - SCREEN_HIDDEN_BOTTOM, SCREEN_WIDTH, 21 + SCREEN_HIDDEN_BOTTOM, OLED_BLACK);
       display.setTextSize(1);
       display.setTextColor(OLED_WHITE, OLED_BLACK);
-      display.setCursor(1, 45);
+      display.setCursor(1, 45 - SCREEN_HIDDEN_BOTTOM);
       display.print((const char *)overlayLine1);
-      display.setCursor(1, 55);
+      display.setCursor(1, 55 - SCREEN_HIDDEN_BOTTOM);
       display.print((const char *)overlayLine2);
       break;
     case OV_BREAK:
@@ -431,7 +431,7 @@ void drawBattBadge() {
   if (s == BATT_NONE || overlay == OV_TEXT) return;
   if (s == BATT_OK && reached(battBadgeUntil)) return;
   uint32_t t = millis();
-  const int x = 57, y = 56;  // 14x8 body + 2px nub
+  const int x = 57, y = 56 - SCREEN_HIDDEN_BOTTOM;  // 14x8 body + 2px nub, above the part the case covers
   int fill;  // 0..10 px
   switch (s) {
     case BATT_CHARGING: fill = ((t / 350) % 5) * 10 / 4; break;  // filling up, over and over
@@ -453,6 +453,15 @@ void drawBattBadge() {
   }
 }
 
+// Clamp where the eyes are heading so they never leave the visible screen: curious eyes
+// grow 8 px when looking sideways, wide eyes are taller, wobbles add a few px.
+static void keepEyesOnScreen() {
+  int maxX = max(EYE_MARGIN, eyes.getScreenConstraint_X() - EYE_MARGIN);
+  int maxY = max(EYE_MARGIN, eyes.getScreenConstraint_Y() - max(EYE_MARGIN, SCREEN_HIDDEN_BOTTOM));
+  eyes.eyeLxNext = constrain(eyes.eyeLxNext, EYE_MARGIN, maxX);
+  eyes.eyeLyNext = constrain(eyes.eyeLyNext, EYE_MARGIN, maxY);
+}
+
 void eyesTask(void *) {
   uint8_t rotation = DISPLAY_ROTATION;
   bool on = true, dimmed = false;
@@ -466,6 +475,7 @@ void eyesTask(void *) {
       bool dim = wantDim || battSave;
       if (dim != dimmed) { dimmed = dim; oledDim(dimmed); }
       if (on) {
+        keepEyesOnScreen();
         eyes.drawEyes();   // autoDisplayEnabled is off: this only draws into the buffer
         drawOverlay();
         drawBattBadge();
