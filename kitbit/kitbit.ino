@@ -42,6 +42,9 @@
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 #include "config.h"
+#if ENABLE_MIC
+#include <ESP_I2S.h>
+#endif
 
 #if ENABLE_TOUCH && !SOC_TOUCH_SENSOR_SUPPORTED
 #error "This chip has no capacitive touch (e.g. ESP32-C3) - set ENABLE_TOUCH 0 in config.h"
@@ -558,6 +561,83 @@ void confusedEyes() { BusLock lock; eyes.anim_confused(); }
 //  MOTION (MPU6050)
 // =====================================================================
 
+// =====================================================================
+//  MICROPHONE: hears the sharp click of a finger on the case
+// =====================================================================
+#if ENABLE_MIC
+I2SClass i2s;
+#endif
+volatile bool micOk = false;
+volatile uint32_t micClickCount = 0, micClickMs = 0;
+volatile float micBg = 0, micPeakMax = 0;  // for the "mic" serial stream
+volatile float micPeakDbg = 0;              // loudest chunk since the last tapdebug line
+bool micStream = false;
+bool tapDebug = false;  // "tapdebug": raw tap data at 100 Hz for tools/tap_test.py
+
+#if ENABLE_MIC
+void micTask(void *) {
+  static int32_t buf[128];  // 8 ms at 16 kHz
+  float prevX = 0, hp = 0, bg = 0;
+  bool armed = true, checked = false;
+  uint32_t calmSince = 0, lastSound = 0, good = 0, total = 0, start = millis();
+  for (;;) {
+    size_t n = i2s.readBytes((char *)buf, sizeof buf) / 4;
+    if (!n) { vTaskDelay(1); continue; }
+    uint32_t now = millis();
+    if (!checked) {  // the first second: is a mic actually talking to us?
+      for (size_t i = 0; i < n; i++) { total++; if (buf[i] != 0 && buf[i] != -1) good++; }
+      if (now - start > 1000) {
+        checked = true;
+        micOk = good > total / 2;
+        Serial.println(micOk ? F("Microphone OK - taps are counted by ear") : F("Microphone not answering - taps use the IMU only"));
+        if (!micOk) { i2s.end(); vTaskDelete(NULL); }
+      }
+      continue;
+    }
+    if (soundPlaying) lastSound = now;
+    bool speakerQuiet = now - lastSound > 150;  // never hear our own buzzer as a tap
+    for (size_t j = 0; j < n; j += 32) {        // 2 ms chunks
+      float peak = 0;
+      for (size_t k = j; k < j + 32 && k < n; k++) {
+        float x = (float)(buf[k] >> 8);         // 24-bit sample
+        hp = x - prevX + 0.95f * hp;            // high-pass: drop DC and rumble, keep the click
+        prevX = x;
+        if (fabsf(hp) > peak) peak = fabsf(hp);
+      }
+      if (bg <= 0) bg = peak;
+      if (peak > micPeakMax) micPeakMax = peak;
+      if (peak > micPeakDbg) micPeakDbg = peak;
+      float thresh = max((float)MIC_CLICK_MIN, bg * MIC_CLICK_RATIO);
+      if (armed && speakerQuiet && peak > thresh) {
+        armed = false;
+        micClickMs = now;
+        micClickCount = micClickCount + 1;
+      } else if (!armed) {  // one click = one count: wait until it's calm again for 40 ms
+        if (peak < bg * 2.5f + MIC_CLICK_MIN * 0.2f) {
+          if (!calmSince) calmSince = now;
+          if (now - calmSince > 40) { armed = true; calmSince = 0; }
+        } else {
+          calmSince = 0;
+        }
+      }
+      bg += (peak - bg) * (peak < bg * 3 ? 0.005f : 0.0002f);  // background follows the room, not the clicks
+    }
+    micBg = bg;
+  }
+}
+#endif
+
+void micBegin() {
+#if ENABLE_MIC && TAP_SOURCE > 0
+  i2s.setPins(PIN_MIC_SCK, PIN_MIC_WS, -1, PIN_MIC_SD);
+  if (!i2s.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO, I2S_STD_SLOT_LEFT)) {
+    Serial.println(F("Microphone: I2S failed to start - taps use the IMU only"));
+    return;
+  }
+  xTaskCreatePinnedToCore(micTask, "mic", 4096, NULL, 1, NULL, 0);
+#endif
+}
+
 const char *ORIENT_NAMES[] = {"upright", "tilted", "upside-down", "lying-left", "lying-right", "face-up", "face-down"};
 
 bool imuOk = false;
@@ -883,15 +963,45 @@ void imuStep() {
       lastTapCandMs = now;
       tapArmed = false;
       tapCount = 0;
-    } else if (tapG > TAP_G) {
+    } else if (!micOk && tapG > TAP_G) {  // no mic: the IMU alone decides
       tapCount++;
       tapSide += kick >= 0 ? toBody(kickDir).x : dyn.x;
       lastTapMs = lastTapCandMs = now;
       tapArmed = false;
     }
   }
+
+  // With the mic: a tap = a sharp click it heard + a (tiny) jolt of the pet itself,
+  // at the same moment. Clicks without a jolt (typing, claps) are ignored.
+  if (tapDebug) {  // S,ms,imu kick (g),mic peak,mic background,handling,shaking,falling,sound
+    Serial.printf("S,%lu,%.3f,%.0f,%.0f,%d,%d,%d,%d\n", (unsigned long)now, tapG, micPeakDbg, micBg,
+                  handling, shaking, falling, soundPlaying);
+    micPeakDbg = 0;
+  }
+  static uint32_t lastKickMs = 0, seenClicks = 0, pendingClickMs = 0;
+  static float lastKickSide = 0;
+  static bool clickPending = false;
+  if (tapG > TAP_CONFIRM_G) { lastKickMs = now; lastKickSide = kick >= 0 ? toBody(kickDir).x : dyn.x; }
+  if (micOk) {
+    if (micClickCount != seenClicks) { seenClicks = micClickCount; pendingClickMs = micClickMs; clickPending = true; }
+    if (clickPending) {
+      bool jolted = TAP_SOURCE == 2 ||
+                    (lastKickMs && (uint32_t)abs((int32_t)(lastKickMs - pendingClickMs)) <= TAP_MATCH_MS);
+      if (jolted && !handling && !falling && !shaking) {
+        if (tapDebug) Serial.printf("E,%lu,click_tap\n", (unsigned long)now);
+        clickPending = false;
+        tapCount++;
+        tapSide += lastKickSide;
+        lastTapMs = now;
+      } else if (now - pendingClickMs > TAP_MATCH_MS + 20) {
+        if (tapDebug) Serial.printf("E,%lu,click_ignored\n", (unsigned long)now);
+        clickPending = false;  // just a noise in the room
+      }
+    }
+  }
   if (tapCount && now - lastTapMs > TAP_WINDOW_MS) {
     if (!handling) { ev.taps = tapCount; ev.tapSide = tapSide; }
+    if (tapDebug) Serial.printf("E,%lu,taps,%d\n", (unsigned long)now, tapCount);
     tapCount = 0;
     tapSide = 0;
   }
@@ -2156,7 +2266,7 @@ void printStatus() {
 }
 
 void printHelp() {
-  Serial.println(F("commands: status imu calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing"));
+  Serial.println(F("commands: status imu mic calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing"));
   Serial.println(F("          scare annoy dizzy"));
   Serial.println(F("          hiccup sneeze greet break birthday happy sad angry sound <id> reset"));
   Serial.println(F("          batt  off  fakebatt <0-100|charging|full|auto>"));
@@ -2168,6 +2278,17 @@ void runCommand(String cmd) {
   if (cmd == "help") printHelp();
   else if (cmd == "status") printStatus();
   else if (cmd == "imu") { imuStream = !imuStream; }
+  else if (cmd == "tapdebug") { tapDebug = !tapDebug; Serial.printf("I,tapdebug,%d,mic,%d\n", tapDebug, micOk); }
+  else if (cmd.startsWith("prompt")) {  // prompt <line1>|<line2>  (empty = clear)
+    static char p1[22], p2[22];
+    String t = cmd.length() > 7 ? cmd.substring(7) : String();
+    int bar = t.indexOf('|');
+    strlcpy(p1, (bar >= 0 ? t.substring(0, bar) : t).c_str(), sizeof p1);
+    strlcpy(p2, bar >= 0 ? t.substring(bar + 1).c_str() : "", sizeof p2);
+    if (t.length()) { overlayLine1 = p1; overlayLine2 = p2; showOverlay(OV_TEXT, 0); }
+    else clearOverlay(OV_TEXT);
+  }
+  else if (cmd == "mic") { micStream = !micStream; if (!micOk) Serial.println(F("microphone not running")); }
   else if (cmd == "calibrate") startCalibration();
   else if (cmd == "calreset") { clearMounting(); Serial.println(F("Calibration cleared - using config.h mapping")); }
   else if (cmd == "mute") { muted = true; hush(); }
@@ -2216,6 +2337,13 @@ void serialStep() {
     } else if (line.length() < 64) {
       line += c;
     }
+  }
+  static uint32_t lastMicPrint = 0;
+  if (micStream && micOk && since(lastMicPrint) > 200) {
+    lastMicPrint = millis();
+    Serial.printf("mic background=%6.0f  loudest=%7.0f  click threshold=%7.0f  clicks=%lu\n", micBg, micPeakMax,
+                  max((float)MIC_CLICK_MIN, micBg * MIC_CLICK_RATIO), (unsigned long)micClickCount);
+    micPeakMax = 0;
   }
   static uint32_t lastPrint = 0;
   if (imuStream && imuOk && since(lastPrint) > 100) {
@@ -2278,6 +2406,7 @@ void setup() {
   // Core 0 exists on every ESP32 (the C3 is single-core; dual-core chips run loop() on core 1).
   xTaskCreatePinnedToCore(eyesTask, "eyes", 4096, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(soundTask, "sound", 4096, NULL, 1, NULL, 0);
+  micBegin();
 
   uint32_t now = millis();
   lastInteraction = now;

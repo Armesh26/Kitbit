@@ -60,6 +60,21 @@
 #define TAP_G              0.20f   // a kick bigger than this counts as a tap / knock
 #define BUMP_G             1.50f   // anything harder is a startling bump / desk slam
 #define TAP_DEBOUNCE_MS    120
+
+// ---------------- Microphone (INMP441, I2S) -----------------------------
+// VDD 3V3, GND, L/R -> GND, SCK D2, WS D3, SD D10.
+// Taps are counted from the sharp click the mic hears; the IMU only has to agree
+// that the pet itself got touched (otherwise typing next to it would count).
+// If the mic doesn't answer at boot, taps fall back to the IMU alone.
+#define ENABLE_MIC         1
+#define PIN_MIC_SCK        D2
+#define PIN_MIC_WS         D3
+#define PIN_MIC_SD         D10
+#define TAP_SOURCE         1       // 0 = IMU only, 1 = mic click + IMU jolt together (best), 2 = mic only
+#define MIC_CLICK_RATIO    6.0f    // a click is this many times louder than the background
+#define MIC_CLICK_MIN      8000.0f // ...and at least this loud (watch "mic" on serial to tune)
+#define TAP_CONFIRM_G      0.05f   // the tiny IMU jolt that confirms a mic click was on the pet
+#define TAP_MATCH_MS       50      // click and jolt must be this close in time
 #define TAP_WINDOW_MS      450     // taps closer than this are grouped (double / triple tap)
 #define HANDLE_GYRO_DPS    25.0f   // rotation that means "someone is holding me"
 #define SHAKE_G            1.0f    // movement (g) that counts towards shaking; gentle handling stays below

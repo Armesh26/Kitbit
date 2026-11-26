@@ -4,3 +4,4 @@ build/
 *.map
 .vscode/
 .DS_Store
+tools/tap_logs/
