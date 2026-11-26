@@ -159,8 +159,7 @@
 #define ENABLE_BATTERY     1
 #define PIN_BATTERY        D0      // A0 / GPIO2
 #define BATT_DIVIDER       2.0f    // (R1 + R2) / R2
-#define BATT_CAL           1.03f   // fixed correction: this board read ~4.08 V on the 4.20 V charging plateau
-                                   // (it can still fine-tune itself on top of this:
+#define BATT_CAL           1.00f   // fixed correction; usually leave at 1: the pet calibrates itself
                                    // (charging plateau = 4.20 V) or use serial "battcal <multimeter volts>"
 #define BATT_CV_V          4.20f   // the charger holds the cell exactly here at the end of charging
 // Optional real "plugged in" signal: 5V pin --[10k]-- D6 --[20k]-- GND.
