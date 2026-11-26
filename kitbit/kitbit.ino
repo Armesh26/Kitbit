@@ -870,6 +870,7 @@ bool batMode = false;
 uint32_t upsideDownSince = 0, nextHelpAt = 0;
 uint32_t lieDownSince = 0;
 uint32_t lastPickupJoy = 0;
+uint32_t battWokeAt = 0;  // last time it came back from sleep (0 = boot, also counts)
 
 uint32_t nextQuirkAt = 0;
 uint32_t nextSnoreAt = 0, nextDreamAt = 0, peekCloseAt = 0;
@@ -921,6 +922,7 @@ void setActivity(Activity a) {
     clearOverlay(OV_ZZZ);
   }
   if (a == ACT_AWAKE) scheduleQuirk();
+  if (a == ACT_AWAKE || a == ACT_DROWSY) battWokeAt = millis();  // battery voltage settles for a while
   Serial.printf("[pet] %s\n", ACTIVITY_NAMES[a]);
 }
 
@@ -1725,6 +1727,10 @@ bool battFake = false;   // serial "fakebatt" for trying the reactions
 float battPctEst = 100;
 char battMsg1[22], battMsg2[22];
 
+bool battSettling() {
+  return activity == ACT_ASLEEP || activity == ACT_HIDING || since(battWokeAt) < minutes(10);
+}
+
 bool battOnBattery() { return battState == BATT_OK || battState == BATT_LOW || battState == BATT_CRITICAL; }
 
 static const float LIPO_V[] = {3.30f, 3.50f, 3.64f, 3.68f, 3.71f, 3.75f, 3.80f, 3.85f, 3.92f, 4.00f, 4.10f, 4.20f};
@@ -1897,12 +1903,15 @@ void battMeasure() {
   // A charger pushes the voltage up quickly and keeps it up. A battery that just has less
   // to do (asleep, dimmed screen) also creeps up a bit, so: bigger thresholds, and a jump
   // only counts if it is still there 20 s later.
-  else if (!charging && battJumpAt && since(battJumpAt) >= 20000) {
-    if (battV - battJumpBase > 0.07f) { charging = true; why = "voltage jumped up and stayed up"; }
+  // Asleep / hiding, or just back from sleep: the battery voltage drifts on its own,
+  // so use the long check (bigger jump, confirmed after 60 s, no slow-rise rule).
+  // The rest of the time the normal check (confirmed after 20 s).
+  else if (!charging && battJumpAt && since(battJumpAt) >= (battSettling() ? 60000UL : 20000UL)) {
+    if (battV - battJumpBase > (battSettling() ? 0.10f : 0.07f)) { charging = true; why = "voltage jumped up and stayed up"; }
     battJumpAt = 0;
   }
-  else if (!charging && !battJumpAt && jump > 0.08f) { battJumpAt = now; battJumpBase = oldest; }
-  else if (!charging && trend5 > 0.07f && since(battUnplugAt) > minutes(6)) { charging = true; why = "voltage rising for 5 min"; }
+  else if (!charging && !battJumpAt && jump > (battSettling() ? 0.10f : 0.08f)) { battJumpAt = now; battJumpBase = oldest; }
+  else if (!charging && !battSettling() && trend5 > 0.07f && since(battUnplugAt) > minutes(6)) { charging = true; why = "voltage rising for 5 min"; }
   else if (charging && jump < (battFull ? -0.03f : -0.06f)) { charging = false; why = "voltage dropped"; }  // a full cell only drops a little
   else if (charging && trend5 < -0.01f && since(battChargeStart) > minutes(3)) { charging = false; why = "voltage falling"; }
 #endif
