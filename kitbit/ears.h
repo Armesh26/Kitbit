@@ -130,6 +130,7 @@ class Ears {
   float heldRef = 0, secHeld = 0;
   int heldLen = 0;
   uint8_t singHist = 0;
+  uint32_t lastVoiceMs = 0;
   void heldNote(bool have, float midi) {
     const int minFrames = SUNG_HOLD_MS / 16;
     if (have && heldLen && fabsf(midi - heldRef) < 0.5f) {
@@ -479,5 +480,8 @@ class Ears {
       st.pitch = false;
     }
     heldNote(st.pitch, st.pitchMidi);
+    // Fast exit: no pitch at all for SING_END_MS -> the singing / humming has stopped.
+    if (st.pitch) lastVoiceMs = now;
+    if (st.singing && now - lastVoiceMs > SING_END_MS) { st.singing = false; singHist = 0; }
   }
 };

@@ -214,6 +214,7 @@
 // notes (a pitch kept within half a semitone for SUNG_HOLD_MS); talking glides, ~0.
 #define SUNG_MIN           0.30f
 #define SUNG_HOLD_MS       200
+#define SING_END_MS        700     // no voice pitch at all this long: singing has stopped
 #define REPEAT_START_MS    400     // a steady pitch this long starts listening
 #define REPEAT_END_MS      900     // this long without a pitch ends the tune
 #define REPEAT_MAX_MS      8000
