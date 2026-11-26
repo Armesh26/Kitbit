@@ -23,7 +23,7 @@
 #define SCREEN_HEIGHT      64
 #define OLED_ADDR          0x3C
 #define DISPLAY_ROTATION   2       // 0 = normal, 2 = display mounted upside down (180 deg)
-#define EYES_FPS           30
+#define EYES_FPS           20      // each frame keeps the I2C bus busy ~27 ms; 30 fps starved the motion sensor
 // The OLED and the MPU6050 share the I2C bus. 400 kHz is the OLED's rated
 // maximum; going faster garbles the picture on many modules.
 #define I2C_DISPLAY_HZ     400000
@@ -55,7 +55,7 @@
 #define IMU_OUT_SIGN       (-1)
 
 // ---------------- Motion thresholds (in g / deg per second) ----------
-// Taps are measured from the sensor's own 500 Hz buffer: the peak kick (g) away from gravity.
+// Taps are measured from the sensor's own 250 Hz buffer: the peak kick (g) away from gravity.
 // Watch "tap=" in the "imu" stream while tapping to tune these.
 #define TAP_G              0.20f   // a kick bigger than this counts as a tap / knock
 #define BUMP_G             1.50f   // anything harder is a startling bump / desk slam

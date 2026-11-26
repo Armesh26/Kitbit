@@ -60,7 +60,8 @@ First check that the 5V pin reads about 0 V when the board runs on battery alone
 
 ## Motion sensing
 
-- **Taps are read from the sensor's FIFO.** It samples the accelerometer at 500 Hz with about a 184 Hz filter. `imuFifoPeak()` returns the biggest deviation from gravity since the last step, which is compared against `TAP_G` and `BUMP_G`. At the old 100 Hz / 44 Hz settings, taps were smoothed away.
+- **Taps come from the sensor FIFO.** It samples the accelerometer at 250 Hz with about a 184 Hz filter. On the 6500 family, FIFO_MODE makes it stop when full instead of scrambling. `imuFifoPeak()` drains the whole FIFO, drops implausible samples, and gives each jolt its exact time from its position in the FIFO. Mic clicks carry exact times as well, and a tap is a click plus a jolt within `TAP_MATCH_MS` of each other.
+- **The OLED hogs the I2C bus.** A frame takes about 27 ms. At 30 fps, the loop and IMU ran at only about 12 Hz, and the FIFO overflowed into garbage. Keep `EYES_FPS` at 20 or lower.
 - **If the FIFO never delivers data, taps fall back to plain samples.** A message is printed when this happens.
 - **Each tap counts once.** Taps are ignored while the buzzer plays and for 150 ms after, because its vibration used to count as taps. After a tap, the next one only counts once the sensor has calmed below `TAP_G / 2`. Calibration has no tap gesture, because it used to trigger by accident; it starts only from serial `calibrate`.
 - **Shaking was too sensitive before.** It now needs movement above `SHAKE_G`, and dizziness builds up more slowly. If you lower these thresholds again, test them on the hardware.

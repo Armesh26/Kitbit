@@ -663,9 +663,9 @@ bool shaking = false;   float shakeMeter = 0;  uint32_t shakeStartMs = 0;
 float dizzy = 0;
 bool falling = false;   uint8_t lowGCount = 0, normalCount = 0;  uint32_t fallStartMs = 0;
 uint8_t tapCount = 0;   float tapSide = 0;  uint32_t lastTapMs = 0, lastTapCandMs = 0;
-// The sensor fills its FIFO at 500 Hz; every step we look at all new samples for the biggest kick.
+// The sensor fills its FIFO at 250 Hz; every step we look at all new samples for the biggest kick.
 bool fifoOk = true;  uint16_t fifoEmptySteps = 0;
-float fifoGrav[3] = {0, 0, 1};  bool fifoGravInit = false;  // sensor-frame gravity, tracked at 500 Hz
+float fifoGrav[3] = {0, 0, 1};  bool fifoGravInit = false;  // sensor-frame gravity, tracked at 250 Hz
 float tapPeak = 0;  // biggest kick since the last "imu" line
 uint32_t deskActiveUntil = 0;
 Orient orient = OR_UPRIGHT, prevOrient = OR_UPRIGHT, orientCand = OR_UPRIGHT;
@@ -784,8 +784,10 @@ bool imuBegin() {
   delay(100);
   imuWrite(0x6B, 0x01);  // wake up, clock from gyro PLL
   delay(50);
-  imuWrite(0x19, 0x01);  // SMPLRT_DIV: 1 kHz / (1+1) = 500 Hz (into the FIFO)
-  imuWrite(0x1A, 0x01);  // CONFIG: DLPF ~184 Hz, keeps the sharp spike of a tap
+  imuWrite(0x19, 0x03);  // SMPLRT_DIV: 1 kHz / (1+3) = 250 Hz (into the FIFO: 1.5 kB/s, 512 B lasts 340 ms)
+  // CONFIG: DLPF ~184 Hz keeps the sharp spike of a tap. 6500 family: FIFO_MODE = stop when
+  // full instead of overwriting, which scrambles the byte order on these chips.
+  imuWrite(0x1A, imuWho != 0x68 ? 0x41 : 0x01);
   imuWrite(0x1B, 0x08);  // GYRO_CONFIG: +-500 dps
   imuWrite(0x1C, 0x08);  // ACCEL_CONFIG: +-4 g
   if (imuWho != 0x68) imuWrite(0x1D, 0x01);  // ACCEL_CONFIG2 (6500 family): accel DLPF ~218 Hz
@@ -849,7 +851,7 @@ void imuFifoReset() {
 // so they can be matched with mic clicks even when the bus was busy with the screen.
 uint32_t kickMs[8] = {0};  float kickSide[8] = {0};  uint8_t kickIdx = 0;
 
-// Drains the whole FIFO (500 Hz) and returns the biggest kick away from gravity (g),
+// Drains the whole FIFO (250 Hz) and returns the biggest kick away from gravity (g),
 // with its direction in the sensor frame. Returns -1 if nothing was read.
 float imuFifoPeak(float dir[3]) {
   uint8_t st = 0, c[2];
@@ -866,15 +868,21 @@ float imuFifoPeak(float dir[3]) {
   while (done < total) {
     uint8_t n = min<uint16_t>(total - done, 20);  // 20 samples = 120 bytes, fits the I2C buffer
     if (!imuRead(0x74, b, n * 6)) { imuFifoReset(); return peak > 0 ? peak : -1; }
+    uint8_t bad = 0;
     for (uint8_t i = 0; i < n; i++) {
       float s[3];
       for (int k = 0; k < 3; k++) s[k] = (int16_t)(b[i * 6 + k * 2] << 8 | b[i * 6 + k * 2 + 1]) / 8192.0f;
+      float mag = sqrtf(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+      if (mag < 0.3f || mag > 3.9f) {  // empty / scrambled sample: a tap on a desk pet is never like that
+        if (++bad > 2) { imuFifoReset(); return peak > 0 ? peak : -1; }
+        continue;
+      }
       if (!fifoGravInit) { memcpy(fifoGrav, s, sizeof s); fifoGravInit = true; }
       float d[3], m = 0;
       for (int k = 0; k < 3; k++) { d[k] = s[k] - fifoGrav[k]; m += d[k] * d[k]; fifoGrav[k] += d[k] * 0.01f; }
       m = sqrtf(m);
       if (m > peak) { peak = m; memcpy(dir, d, sizeof d); }
-      uint32_t t = now - (uint32_t)(total - 1 - (done + i)) * 2;  // 2 ms per sample
+      uint32_t t = now - (uint32_t)(total - 1 - (done + i)) * 4;  // 4 ms per sample
       if (m > TAP_CONFIRM_G && t - lastKickAt > 30) {
         lastKickAt = t;
         kickMs[kickIdx] = t;
