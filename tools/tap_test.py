@@ -20,8 +20,9 @@ import time
 
 import serial
 
-WORDS = {0: "DON'T TOUCH", 1: "TAP ONCE", 2: "TAP TWICE", 3: "TAP 3 TIMES", -1: "SLAM THE DESK"}
-SLAM = -1
+WORDS = {0: "DON'T TOUCH", 1: "TAP ONCE", 2: "TAP TWICE", 3: "TAP 3 TIMES", -1: "SLAM THE DESK",
+         -2: "SCRATCH MY HEAD", -3: "TYPE ON KEYBOARD"}
+SLAM, SCRATCH, TYPE = -1, -2, -3
 
 
 def open_port(port, baud):
@@ -78,6 +79,7 @@ def main():
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--slam", action="store_true", help="tap once vs slam the desk, to tell them apart")
+    ap.add_argument("--scratch", action="store_true", help="scratching the head vs typing vs taps")
     args = ap.parse_args()
 
     try:
@@ -114,7 +116,9 @@ def main():
     print(f"tapdebug on, microphone {'working' if mic else 'NOT working (IMU only)'}")
 
     trials = []
-    if args.slam:
+    if args.scratch:
+        trials = [SCRATCH, TYPE, SCRATCH, 0, SCRATCH, 1, TYPE, SCRATCH]
+    elif args.slam:
         for _ in range(max(args.rounds, 4)):
             trials += [1, SLAM]
     else:
@@ -124,14 +128,16 @@ def main():
 
     print("Watch the pet's screen and do what it says.\n")
     for i, n in enumerate(trials):
-        hint = "type on keyboard" if n == 0 and i == len(trials) - 1 else ""
+        hint = "type on keyboard" if n == 0 and i == len(trials) - 1 and not args.scratch else ""
+        if n == SCRATCH:
+            hint = "keep going 4 s"
         pet.phase, pet.trial = "ready", i
         pet.say(f"{i + 1}/{len(trials)} get ready", WORDS[n].lower())
         print(f"[{i + 1}/{len(trials)}] get ready: {WORDS[n]} {hint}")
         pet.pump(2.0)
         pet.phase = "go"
         pet.say(f">> {WORDS[n]} <<", hint or "now!")
-        pet.pump(3.5)
+        pet.pump(4.0 if args.scratch else 3.5)
         pet.phase = "after"
         pet.say("ok, hands off", "")
         pet.pump(1.5)
@@ -190,7 +196,12 @@ def main():
     print("\n#  asked detected  heard  jolts  click loudness            jolt size (g)        result")
     tap_imu, tap_mic, ok = [], [], 0
     for i, (n, d) in enumerate(zip(trials, data)):
-        good = (d["taps"] == 0 and "bump" in d["events"]) if n == SLAM else d["taps"] == n
+        if n == SLAM:
+            good = d["taps"] == 0 and "bump" in d["events"]
+        elif n in (SCRATCH, TYPE):
+            good = d["taps"] == 0  # (scratch detection itself isn't built yet)
+        else:
+            good = d["taps"] == n
         ok += good
         clicks = sorted((v for _, v in d["clicks"]), reverse=True)
         kicks = sorted((v for _, v in d["kicks"]), reverse=True)
@@ -215,6 +226,30 @@ def main():
         print(f"Tap clicks: {min(tap_mic):.0f} .. {max(tap_mic):.0f}  (median {statistics.median(tap_mic):.0f})")
     print("ignored = mic heard a click but the pet didn't move (typing / room noise, or a jolt that was too small)")
     print("blocked = click + jolt, but the pet thought it was being held / shaken / dropped")
+    if args.scratch:
+        # Sustained features over the whole "go" window, per ~100 ms window.
+        print("\nwhat each activity looks like over time (per 100 ms window):")
+        print("  trial kind       mic loud%  mic level/bg (median)  IMU busy%  IMU level g (median)  biggest jolt")
+        names = {SCRATCH: "scratch", TYPE: "typing", 0: "nothing", 1: "tap"}
+        for i, (n, d) in enumerate(zip(trials, data)):
+            imu, micv = d["imu"], d["mic"]
+            if not imu:
+                continue
+            bg = max(1.0, statistics.median([float(l.split(",")[4]) for _, ph, tr, l in pet.rows
+                                              if tr == i and ph == "go" and l.startswith("S,")] or [1]))
+            t0 = imu[0][0]
+            wins = {}
+            for (t, a), (_, m) in zip(imu, micv):
+                w = (t - t0) // 100
+                wa, wm = wins.get(w, (0, 0))
+                wins[w] = (max(wa, a), max(wm, m))
+            ws = list(wins.values())
+            mic_ratio = [m / bg for _, m in ws]
+            loud = sum(r > 4 for r in mic_ratio) / len(ws)
+            busy = sum(a > 0.03 for a, _ in ws) / len(ws)
+            print(f"  {i + 1:<5} {names.get(n, n):<9} {loud * 100:8.0f}%  {statistics.median(mic_ratio):20.1f}  "
+                  f"{busy * 100:8.0f}%  {statistics.median(a for a, _ in ws):19.3f}  {max(a for a, _ in ws):11.2f}")
+
     if args.slam:
         # Features of the first event in each trial, to see what separates a tap from a slam.
         print("\nfeatures of the first hit:  kind   size g  up-share  side-share  ring ms  #jolts/300ms  click")
