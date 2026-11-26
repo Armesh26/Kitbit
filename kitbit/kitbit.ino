@@ -127,6 +127,8 @@ struct MotionEvents {
   uint32_t shakeMs = 0;
   bool pickup = false, putdown = false;
   bool orientChanged = false;
+  bool scratchStart = false, scratchEnd = false;
+  uint32_t scratchMs = 0;
 };
 
 enum Activity : uint8_t { ACT_AWAKE, ACT_DROWSY, ACT_ASLEEP, ACT_HIDING };
@@ -572,6 +574,8 @@ volatile uint32_t micClickCount = 0;
 volatile uint32_t micClickTimes[8];  volatile float micClickPeaks[8];  // last 8 clicks, exact time
 volatile float micBg = 0, micPeakMax = 0;  // for the "mic" serial stream
 volatile float micPeakDbg = 0;              // loudest chunk since the last tapdebug line
+volatile float micPeakWin = 0;              // loudest chunk in the current 100 ms scratch window
+bool scratching = false;  uint32_t scratchStartMs = 0, scratchEndMs = 0;
 bool micStream = false;
 bool tapDebug = false;  // "tapdebug": raw tap data at 100 Hz for tools/tap_test.py
 
@@ -608,6 +612,7 @@ void micTask(void *) {
       if (bg <= 0) bg = peak;
       if (peak > micPeakMax) micPeakMax = peak;
       if (peak > micPeakDbg) micPeakDbg = peak;
+      if (peak > micPeakWin) micPeakWin = peak;
       float thresh = max((float)MIC_CLICK_MIN, bg * MIC_CLICK_RATIO);
       if (armed && speakerQuiet && peak > thresh) {
         armed = false;
@@ -1102,7 +1107,54 @@ void imuStep() {
       }
     }
   }
-  if (tapCount && now - lastTapMs > TAP_WINDOW_MS) {
+  // --- head scratches: rough noise + small vibration of the pet, for most of a second ---
+  static uint32_t winStart = 0;
+  static float winImu = 0;
+  static bool winSound = false;
+  static uint16_t scratchBits = 0;
+  if (tapG > winImu) winImu = tapG;
+  if (soundPlaying) winSound = true;
+  if (micOk && now - winStart >= 100) {
+    if (!winSound) {  // windows with our own buzzer in them prove nothing either way
+      bool scratchy = micPeakWin > micBg * SCRATCH_MIC_RATIO && winImu > SCRATCH_IMU_G;
+      scratchBits = ((scratchBits << 1) | scratchy) & 0x3FF;
+      int n = __builtin_popcount(scratchBits);
+      if (!scratching && n >= SCRATCH_START_OF_10 && !handling && !shaking && !falling) {
+        scratching = true;
+        scratchStartMs = now;
+        ev.scratchStart = true;
+        tapCount = 0;  // those "taps" were the scratching
+        if (tapDebug) Serial.printf("E,%lu,scratch_start\n", (unsigned long)now);
+      } else if (scratching && (n <= SCRATCH_STOP_OF_10 || handling || shaking)) {
+        scratching = false;
+        scratchEndMs = now;
+        ev.scratchEnd = true;
+        ev.scratchMs = now - scratchStartMs;
+        if (tapDebug) Serial.printf("E,%lu,scratch_end\n", (unsigned long)now);
+      }
+    }
+    winStart = now;
+    winImu = 0;
+    micPeakWin = 0;
+    winSound = false;
+  }
+  // No taps while (or right after) being scratched: every stroke sounds like a click.
+  // A tap group that looked scratchy at any point is thrown away.
+  static bool tapGroupScratchy = false;
+  bool scratchSuspect = scratching || now - scratchEndMs < 600 || __builtin_popcount(scratchBits & 0x1F) >= 3;
+  if (scratchSuspect && tapCount) tapGroupScratchy = true;
+  if (scratching) tapCount = 0;
+  if (!tapCount) tapGroupScratchy = false;
+
+  if (tapCount && now - lastTapMs > TAP_WINDOW_MS && !scratchSuspect) {
+    if (tapGroupScratchy) {
+      if (tapDebug) Serial.printf("E,%lu,taps_dropped_scratchy,%d\n", (unsigned long)now, tapCount);
+      tapCount = 0;
+      tapSide = 0;
+      tapGroupScratchy = false;
+    }
+  }
+  if (tapCount && now - lastTapMs > TAP_WINDOW_MS && !scratchSuspect) {
     if (!handling) { ev.taps = tapCount; ev.tapSide = tapSide; }
     if (tapDebug) Serial.printf("E,%lu,taps,%d\n", (unsigned long)now, tapCount);
     tapCount = 0;
@@ -1329,6 +1381,37 @@ void celebrateBirthday() {
   Serial.printf("[pet] happy birthday! %lu day(s) old\n", (unsigned long)(ageMinutes / 1440));
 }
 
+// ---- head scratches ----
+uint32_t nextPurrAt = 0;
+
+void onScratchStart() {
+  Serial.println(F("[pet] scritches!"));
+  if (activity == ACT_ASLEEP) { say(SND_PURR, 2); return; }  // purrs in its sleep, stays asleep
+  interact();
+  if (activity == ACT_DROWSY) setActivity(ACT_AWAKE);
+  nextPurrAt = 0;
+}
+
+void scratchStep() {  // 50 Hz while being scratched: happy squint, hearts, purring
+  if (!scratching || activity != ACT_AWAKE) return;
+  lastInteraction = millis();
+  react(faceWith(HAPPY), 700);
+  if (overlay != OV_HEARTS) showOverlay(OV_HEARTS, 1500);
+  glance(0, -0.6f, 700);  // leans into it, eyes up
+  if (reached(nextPurrAt) && !soundPlaying) {
+    say(SND_PURR);
+    nextPurrAt = millis() + 1800;
+  }
+  addHappiness(0.02f);  // ~1 point per second
+}
+
+void onScratchEnd(uint32_t ms) {
+  if (ms < 1500) return;
+  react(faceWith(HAPPY), 2000);
+  laughEyes();
+  say(S_HAPPY);
+}
+
 void onTaps(uint8_t n, float side) {
   if (activity == ACT_HIDING) return;
 
@@ -1501,6 +1584,8 @@ void handleMotionEvents() {
     else startle();
   }
 
+  if (e.scratchStart && activity != ACT_HIDING) onScratchStart();
+  if (e.scratchEnd && activity == ACT_AWAKE) onScratchEnd(e.scratchMs);
   if (e.taps) onTaps(e.taps, e.tapSide);
 }
 
@@ -2582,6 +2667,7 @@ void loop() {
     breakBuddyStep();
     activityStep();
     effectsStep();
+    scratchStep();
     quirkStep();
     baselineFace();
     gazeStep();

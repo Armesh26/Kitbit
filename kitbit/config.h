@@ -82,6 +82,13 @@
 #define SLAM_RING_FROM_MS  45
 #define SLAM_RING_TO_MS    130
 #define SLAM_MIN_G         0.30f   // and it has to be at least this big
+
+// Head scratches: measured per 100 ms window, scratching = mic 7-15x louder than the room
+// and the pet vibrating ~0.04 g in 65-85 % of windows; typing / taps: under 10 %.
+#define SCRATCH_MIC_RATIO  4.0f    // a window is "scratchy" if the mic is this much louder than the room...
+#define SCRATCH_IMU_G      0.03f   // ...and the pet itself vibrates at least this much
+#define SCRATCH_START_OF_10 6      // scratchy windows out of the last 10 (1 s) to start purring
+#define SCRATCH_STOP_OF_10  2      // ...and to stop
 #define TAP_WINDOW_MS      450     // taps closer than this are grouped (double / triple tap)
 #define HANDLE_GYRO_DPS    25.0f   // rotation that means "someone is holding me"
 #define SHAKE_G            1.0f    // movement (g) that counts towards shaking; gentle handling stays below

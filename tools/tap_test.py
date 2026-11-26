@@ -198,8 +198,10 @@ def main():
     for i, (n, d) in enumerate(zip(trials, data)):
         if n == SLAM:
             good = d["taps"] == 0 and "bump" in d["events"]
-        elif n in (SCRATCH, TYPE):
-            good = d["taps"] == 0  # (scratch detection itself isn't built yet)
+        elif n == SCRATCH:
+            good = d["taps"] == 0 and "scratch_start" in d["events"]
+        elif n == TYPE:
+            good = d["taps"] == 0 and "scratch_start" not in d["events"]
         else:
             good = d["taps"] == n
         ok += good
