@@ -9,6 +9,11 @@ KitBit is a desk pet for the Seeed XIAO ESP32C3. It has animated robot eyes on a
 | 1.3" SH1106 128x64 OLED (I2C, 0x3C); for a 0.96" SSD1306 set `OLED_SH1106 0` | SDA D7, SCL D5 |
 | MPU6050 or clone (I2C, 0x68 or 0x69) | SDA D7, SCL D5 (same bus) |
 | Passive buzzer | D1 |
+| 1S LiPo (3.7 V) | BAT+ / BAT- pads on the back. The XIAO charges it over USB. |
+| Battery voltage divider: BAT+ to 220k to **D0** to 220k to GND, plus an optional 100 nF from D0 to GND | D0 (A0) |
+| Optional "plugged in" sense: 5V to 10k to D6 to 20k to GND (set `PIN_USB_SENSE D6`) | D6 |
+
+D4 is not used: on this board GPIO6 is shorted to GND, so SDA moved to D7.
 
 Other ESP32 boards work too: change the pins in [kitbit/config.h](kitbit/config.h). On a classic ESP32 / S2 / S3 you can also add a touch pad (a wire or copper tape on the pet's head) with `ENABLE_TOUCH 1`. The C3 has no touch hardware.
 
@@ -70,9 +75,38 @@ Type `imu` and watch `desk=` while you type on your keyboard. If it never shows 
 - **Random quirks.** It winks, looks around, whistles, yawns, sighs when bored, asks for attention with a "?", giggles to itself, gets hiccups (any tap cures them) and sneezes.
 - **Memory.** Happiness, energy and age are saved to flash. Every 24 h of total uptime it has a birthday and sings.
 
+### Battery
+The XIAO can't measure its battery by itself, so the voltage divider on D0 is needed. If it isn't fitted, the battery features switch themselves off at boot.
+
+| What happens | KitBit does |
+|---|---|
+| You plug in the charger | "yum! charging", munching sounds, happy eyes. A small battery icon at the bottom of the screen keeps filling up. If it was hungry: "FOOD!! thank you!" |
+| It's charging | It doesn't get tired, gets a little happier, and now and then goes "nom nom" |
+| It's full | "I'm full! *burp*", then a full battery icon that sparkles |
+| You unplug it | "unplugged! wheee" with the battery %, or "hey! I'm still hungry..." if it's low |
+| Below 20 % | Tired face, tummy rumble, "I'm hungry... battery 18%", repeated every 10 min. The battery icon blinks. |
+| Below 7 % | Sweating, "feed me please!" every 3 min, and the screen dims to last longer |
+| Below 3.3 V | "too hungry... plug me in", lullaby, then **deep sleep** to protect the LiPo. It checks once a minute and wakes up by itself when you plug in a charger. |
+
+Charging is detected in three ways:
+- **USB to a computer**, which is always reliable.
+- **The 5V sense pin**, if you fit it.
+- **Otherwise, from the voltage jumping up or down when the cable goes in or out.** With a phone charger that can take a few seconds, or a few minutes when you unplug it while it's full.
+
+The percentage is an estimate from the voltage, so it isn't shown while charging.
+
+### Switching it off
+There's no power switch, so "off" means deep sleep: the screen and motion sensor sleep, and the chip wakes for a few milliseconds every 2 s to check whether it has been moved.
+- **Put it face down for 5 min while on battery**, or type `off`. With `off` it says "goodnight!" first.
+- **To switch it back on**, turn or pick it up (more than 30°), plug in a charger, or press RESET.
+
+In deep sleep the battery still drains very slowly, so for long storage unplug the battery.
+
 ## Serial commands (115200 baud)
 
-`help status imu calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing scare annoy dizzy hiccup sneeze greet break birthday happy sad angry sound <id> reset`
+`help status imu calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing scare annoy dizzy hiccup sneeze greet break birthday happy sad angry sound <id> reset batt off fakebatt <0-100|charging|full|auto>`
+
+`fakebatt` lets you try the battery reactions without waiting. For example, `fakebatt 15` makes it hungry and `fakebatt charging` then `fakebatt full` play the charging and full reactions. `fakebatt 0` really switches it off after 20 s: press RESET to bring it back. `fakebatt auto` goes back to measuring the real battery.
 
 `chatty` sets how talkative it is:
 

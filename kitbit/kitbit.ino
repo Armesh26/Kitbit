@@ -25,6 +25,9 @@
 //   - needs: happiness and energy drift over time and change its baseline mood
 //   - random quirks: winks, whistles, yawns, sighs, hiccups, sneezes, giggles
 //   - remembers its mood and age across power cycles, celebrates every 24h of uptime
+//   - battery: munches when you plug it in, burps when full, gets hungry when low,
+//     says goodnight and deep-sleeps before the LiPo is over-discharged
+//   - "off" (or 5 min face down on battery): deep sleep, move it to wake it up
 // =====================================================================
 
 #include <Arduino.h>
@@ -36,6 +39,8 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
 #include "config.h"
 
 #if ENABLE_TOUCH && !SOC_TOUCH_SENSOR_SUPPORTED
@@ -79,8 +84,11 @@ enum CustomSound : int {
   SND_BOOT = 100, SND_YAWN, SND_SNORE, SND_HICCUP, SND_SNEEZE_BUILD, SND_SNEEZE,
   SND_SIGH, SND_GIGGLE, SND_PURR, SND_OOF, SND_WHEE, SND_HELP, SND_WHISTLE,
   SND_SONG_A, SND_SONG_B, SND_PEEKABOO, SND_BREAK, SND_GRUMBLE, SND_CHIRP,
-  SND_BIRTHDAY, SND_RELIEF
+  SND_BIRTHDAY, SND_RELIEF, SND_NOM, SND_BURP, SND_TUMMY, SND_UNPLUG, SND_GOODNIGHT
 };
+
+enum BattState : uint8_t { BATT_NONE, BATT_OK, BATT_LOW, BATT_CRITICAL, BATT_CHARGING, BATT_FULL };
+enum OffReason : uint8_t { OFF_NONE, OFF_USER, OFF_BATTERY };
 
 struct Note { float hz; int ms; };
 
@@ -263,6 +271,25 @@ void playCustom(int id) {
     case SND_RELIEF:
       bend(1200, 700, 1.03, 14, 2); tn(1047, 80, 20); tn(1319, 120);
       break;
+    case SND_NOM:  // nom nom nom
+      for (int i = 0; i < 3; i++) { bend(420, 760, 1.06, 7, 2); hold(110); }
+      break;
+    case SND_BURP:  // low burp, then a little embarrassed giggle
+      bend(330, 140, 1.04, 14, 3); tn(130, 110); hold(220);
+      tn(2093, 40, 30); tn(2637, 60);
+      break;
+    case SND_TUMMY:  // tummy rumble
+      for (int i = 0; i < 5; i++) { tn(110, 45, 0); tn(92, 45, 0); }
+      hold(120);
+      bend(520, 300, 1.03, 16, 2);
+      break;
+    case SND_UNPLUG:  // pop!
+      tn(1600, 15, 20); bend(600, 1900, 1.06, 8);
+      break;
+    case SND_GOODNIGHT:  // little lullaby going down
+      tn(NOTE_E6, 220, 40); tn(NOTE_C6, 220, 40); tn(NOTE_G5, 220, 40); tn(NOTE_C5, 420, 60);
+      bend(520, 260, 1.02, 20, 3);
+      break;
   }
 }
 
@@ -390,6 +417,41 @@ void drawOverlay() {
   }
 }
 
+// ---- battery badge: small battery at the bottom centre, between the eyes ----
+const char *BATT_NAMES[] = {"none", "ok", "low", "critical", "charging", "full"};
+volatile BattState battState = BATT_NONE;
+volatile uint8_t battPct = 100;
+volatile bool battSave = false;          // critical: dim the screen to last longer
+volatile uint32_t battBadgeUntil = 0;    // also show it while on battery until then
+static const uint8_t BOLT_BMP[] PROGMEM = {0x30, 0x60, 0xC0, 0xF8, 0x30, 0x60, 0x40, 0x80};  // 5x8
+
+void drawBattBadge() {
+  BattState s = battState;
+  if (s == BATT_NONE || overlay == OV_TEXT) return;
+  if (s == BATT_OK && reached(battBadgeUntil)) return;
+  uint32_t t = millis();
+  const int x = 57, y = 56;  // 14x8 body + 2px nub
+  int fill;  // 0..10 px
+  switch (s) {
+    case BATT_CHARGING: fill = ((t / 350) % 5) * 10 / 4; break;  // filling up, over and over
+    case BATT_FULL:     fill = 10; break;
+    case BATT_LOW:      if ((t / 700) % 2) return; fill = 2; break;
+    case BATT_CRITICAL: if ((t / 250) % 2) return; fill = 0; break;
+    default:            fill = battPct / 10; break;
+  }
+  display.fillRect(x - 2, y - 2, 20, 10, OLED_BLACK);
+  display.drawRect(x, y, 14, 8, OLED_WHITE);
+  display.fillRect(x + 14, y + 2, 2, 4, OLED_WHITE);
+  if (fill) display.fillRect(x + 2, y + 2, fill, 4, OLED_WHITE);
+  if (s == BATT_CHARGING) icon(x - 8, y, BOLT_BMP, 5, 8);
+  if (s == BATT_CRITICAL) glyph(x + 19, y, '!', 1);
+  if (s == BATT_FULL && (t / 300) % 8 == 0) {  // sparkle
+    display.fillRect(x + 17, y - 4, 5, 5, OLED_BLACK);
+    display.drawFastHLine(x + 17, y - 2, 5, OLED_WHITE);
+    display.drawFastVLine(x + 19, y - 4, 5, OLED_WHITE);
+  }
+}
+
 void eyesTask(void *) {
   uint8_t rotation = DISPLAY_ROTATION;
   bool on = true, dimmed = false;
@@ -400,10 +462,12 @@ void eyesTask(void *) {
       BusLock lock;
       if (wantRotation != rotation) { rotation = wantRotation; display.setRotation(rotation); }
       if (wantDisplayOn != on) { on = wantDisplayOn; oledCommand(on ? OLED_ON_CMD : OLED_OFF_CMD); }
-      if (wantDim != dimmed) { dimmed = wantDim; oledDim(dimmed); }
+      bool dim = wantDim || battSave;
+      if (dim != dimmed) { dimmed = dim; oledDim(dimmed); }
       if (on) {
         eyes.drawEyes();   // autoDisplayEnabled is off: this only draws into the buffer
         drawOverlay();
+        drawBattBadge();
         display.display();
       }
     }
@@ -1158,8 +1222,10 @@ void handleMotionEvents() {
 // ---------------- needs, sleep and the rest of daily life ----------------
 void needsTick() {  // once per second
   bool resting = (activity == ACT_ASLEEP || activity == ACT_HIDING);
+  bool eating = (battState == BATT_CHARGING || battState == BATT_FULL);  // plugged in = being fed
   if (resting) addEnergy(100.0f / (ENERGY_RECHARGE_MIN * 60.0f));
-  else addEnergy(-100.0f / (ENERGY_AWAKE_HOURS * 3600.0f));
+  else if (!eating) addEnergy(-100.0f / (ENERGY_AWAKE_HOURS * 3600.0f));
+  if (eating && happiness < 80) addHappiness(1.0f / 60.0f);  // a full tummy is a happy tummy
 
   if (!resting) {
     bool bored = since(lastInteraction) > minutes(BORED_AFTER_MIN);
@@ -1263,6 +1329,10 @@ void activityStep() {
       break;
 
     case ACT_HIDING:
+#if AUTO_OFF_FACEDOWN_MIN > 0
+      // Hidden face down while on battery: switch off for real (flip it back to wake it).
+      if (battOnBattery() && since(activitySince) > minutes(AUTO_OFF_FACEDOWN_MIN)) powerOff(OFF_USER, false);
+#endif
       break;
   }
 
@@ -1296,9 +1366,9 @@ void baselineFace() {
     case ACT_AWAKE:
       if (orient == OR_UPSIDE_DOWN) f.mood = batMode ? HAPPY : ANGRY;
       else if (handling) f.mood = happiness > 40 ? HAPPY : DEFAULT;
-      else if (energy < 25 || happiness < 30) f.mood = TIRED;
+      else if (energy < 25 || happiness < 30 || battState == BATT_LOW || battState == BATT_CRITICAL) f.mood = TIRED;
       else if (happiness > 85) f.mood = HAPPY;
-      if (breakDue) f.sweat = true;
+      if (breakDue || battState == BATT_CRITICAL) f.sweat = true;
       break;
   }
   showFace(f);
@@ -1627,6 +1697,351 @@ void calibrationStep() {
 }
 
 // =====================================================================
+//  BATTERY + POWER OFF
+//  The XIAO charges the LiPo itself; we only watch the voltage on a divider.
+//  Charging is detected from: USB to a computer, an optional 5V sense pin,
+//  or the voltage jumping up / down when the cable goes in / out.
+//  "Off" is deep sleep: screen + motion sensor asleep, the chip wakes every
+//  couple of seconds for a few ms to see whether it was moved / plugged in.
+// =====================================================================
+RTC_DATA_ATTR uint8_t rtcOffReason = OFF_NONE;  // survives deep sleep
+RTC_DATA_ATTR float rtcOffVolt = 0;
+RTC_DATA_ATTR float rtcOffGrav[3] = {0, 0, 0};
+RTC_DATA_ATTR uint8_t rtcImuAddr = 0;
+OffReason wokeFrom = OFF_NONE;
+
+bool battPresent = false;
+float battV = 0, battVSlow = 0;
+float battSecHist[8];  uint8_t battSecIdx = 0, battSecCount = 0;    // last 8 s
+float battMinHist[21]; uint8_t battMinIdx = 0, battMinCount = 0;    // every 30 s, 10 min
+uint32_t battLastMinPush = 0;
+bool battCharging = false, battFull = false, battUsb = false;
+uint32_t battChargeStart = 0, battUnplugAt = 0, battNextNag = 0, battNextNom = 0;
+uint8_t battEmptyCount = 0;
+bool battFake = false;   // serial "fakebatt" for trying the reactions
+float battPctEst = 100;
+char battMsg1[22], battMsg2[22];
+
+bool battOnBattery() { return battState == BATT_OK || battState == BATT_LOW || battState == BATT_CRITICAL; }
+
+static const float LIPO_V[] = {3.30f, 3.50f, 3.64f, 3.68f, 3.71f, 3.75f, 3.80f, 3.85f, 3.92f, 4.00f, 4.10f, 4.20f};
+static const float LIPO_P[] = {0,     5,     10,    20,    30,    40,    50,    60,    70,    80,    90,    100};
+
+float lipoPercent(float v) {
+  if (v <= LIPO_V[0]) return 0;
+  for (size_t i = 1; i < COUNT(LIPO_V); i++)
+    if (v < LIPO_V[i]) return LIPO_P[i - 1] + (LIPO_P[i] - LIPO_P[i - 1]) * (v - LIPO_V[i - 1]) / (LIPO_V[i] - LIPO_V[i - 1]);
+  return 100;
+}
+
+float battReadVolts() {
+#if ENABLE_BATTERY
+  uint32_t mv = 0;
+  for (int i = 0; i < 16; i++) mv += analogReadMilliVolts(PIN_BATTERY);
+  return mv / 16000.0f * BATT_DIVIDER * BATT_CAL;
+#else
+  return 0;
+#endif
+}
+
+bool battUsbSense() {
+#if PIN_USB_SENSE >= 0
+  return digitalRead(PIN_USB_SENSE);
+#elif ARDUINO_USB_CDC_ON_BOOT && SOC_USB_SERIAL_JTAG_SUPPORTED
+  return HWCDC::isPlugged();  // only true when plugged into a computer, not a phone charger
+#else
+  return false;
+#endif
+}
+
+// Is the divider actually there? A floating pin reads garbage, so pull it down
+// for a moment: with the divider fitted the voltage stays up, floating it collapses.
+bool battDividerFitted() {
+#if ENABLE_BATTERY
+  analogReadMilliVolts(PIN_BATTERY);  // attach the ADC first
+  gpio_pulldown_en((gpio_num_t)PIN_BATTERY);
+  delay(5);
+  uint32_t mv = analogReadMilliVolts(PIN_BATTERY);
+  gpio_pulldown_dis((gpio_num_t)PIN_BATTERY);
+  delay(5);
+  return mv > 300;
+#else
+  return false;
+#endif
+}
+
+void battText(const char *l1, const char *l2, uint32_t ms) {
+  strlcpy(battMsg1, l1, sizeof battMsg1);
+  strlcpy(battMsg2, l2, sizeof battMsg2);
+  overlayLine1 = battMsg1;
+  overlayLine2 = battMsg2;
+  showOverlay(OV_TEXT, ms);
+}
+
+// ---- cute reactions ----
+void onPluggedIn(BattState old) {
+  battNextNom = millis() + random(180000, 360000);
+  if (activity == ACT_ASLEEP) {  // sleepy munching: one eye peeks, back to sleep
+    { BusLock lock; eyes.open(true, false); }
+    peekCloseAt = millis() + 900;
+    say(SND_NOM, 2);
+    return;
+  }
+  bool starving = (old == BATT_LOW || old == BATT_CRITICAL);
+  interact();
+  react(faceWith(HAPPY), 2500);
+  laughEyes();
+  battText(starving ? "FOOD!! thank you!" : "yum! charging", starving ? "nom nom nom" : "", 2500);
+  say(SND_NOM, 1, true);
+  addHappiness(starving ? 10 : 3);
+}
+
+void onFull() {
+  if (activity != ACT_AWAKE) return;  // the badge shows it's full anyway
+  react(faceWith(HAPPY), 3000);
+  laughEyes();
+  battText("I'm full!", "  *burp*", 3000);
+  say(SND_BURP);
+  addHappiness(3);
+}
+
+void onUnplugged(BattState now) {
+  battBadgeUntil = millis() + 6000;
+  if (activity == ACT_ASLEEP) return;
+  interact();
+  if (now == BATT_OK) {
+    react(faceWith(HAPPY), 1800);
+    snprintf(battMsg2, sizeof battMsg2, "wheee! %d%%", battPct);
+    battText("unplugged!", battMsg2, 1800);
+    say(SND_UNPLUG);
+  } else {
+    react(faceWith(TIRED), 2500);
+    battText("hey! I'm still", "hungry...", 2500);
+    say(SND_SIGH);
+  }
+}
+
+void hungry(bool critical) {
+  battNextNag = millis() + minutes(critical ? 3 : BATT_NAG_MIN);
+  if (activity == ACT_ASLEEP || activity == ACT_HIDING || calStage) return;
+  if (activity == ACT_DROWSY) setActivity(ACT_AWAKE);
+  Face f; f.mood = TIRED; f.sweat = critical;
+  react(f, 3000);
+  glance(0, -0.4f, 3000);  // looks up at you, pleading
+  snprintf(battMsg2, sizeof battMsg2, "battery %d%%", battPct);
+  battText(critical ? "feed me please!" : "I'm hungry...", battMsg2, 3000);
+  say(SND_TUMMY, 1, critical);
+  Serial.printf("[batt] hungry! %d%%\n", battPct);
+}
+
+void battSetState(bool charging, bool full, float pct) {
+  BattState old = battState, s;
+  if (full) s = BATT_FULL;
+  else if (charging) s = BATT_CHARGING;
+  else if (pct <= BATT_CRITICAL_PCT || (old == BATT_CRITICAL && pct < BATT_CRITICAL_PCT + 3)) s = BATT_CRITICAL;
+  else if (pct <= BATT_LOW_PCT || ((old == BATT_LOW || old == BATT_CRITICAL) && pct < BATT_LOW_PCT + 3)) s = BATT_LOW;
+  else s = BATT_OK;
+  battPct = (uint8_t)clampf(pct, 0, 100);
+  battSave = (s == BATT_CRITICAL);
+  if (s == old) return;
+  battState = s;
+  faceDirty = true;
+  Serial.printf("[batt] %s -> %s  %d%%  %.2f V\n", BATT_NAMES[old], BATT_NAMES[s], battPct, battV);
+  if (old == BATT_NONE || activity == ACT_HIDING || calStage || bootPending) return;  // no fuss at boot
+
+  bool wasPlugged = (old == BATT_CHARGING || old == BATT_FULL);
+  bool plugged = (s == BATT_CHARGING || s == BATT_FULL);
+  if (!wasPlugged && plugged) onPluggedIn(old);
+  else if (old == BATT_CHARGING && s == BATT_FULL) onFull();
+  else if (wasPlugged && !plugged) onUnplugged(s);
+  else if (s == BATT_LOW && old == BATT_OK) hungry(false);
+  else if (s == BATT_CRITICAL) hungry(true);
+}
+
+void battMeasure() {
+  uint32_t now = millis();
+  float v = battReadVolts();
+  battV += 0.4f * (v - battV);          // ~2 s smoothing
+  battVSlow += 0.05f * (v - battVSlow); // ~20 s smoothing, for the percentage
+
+  float oldest = battSecHist[battSecIdx];
+  battSecHist[battSecIdx] = battV;
+  battSecIdx = (battSecIdx + 1) % 8;
+  if (battSecCount < 8) battSecCount++;
+  float jump = battSecCount >= 8 ? battV - oldest : 0;  // change over the last 8 s
+
+  if (since(battLastMinPush) >= 30000) {
+    battLastMinPush = now;
+    battMinHist[battMinIdx] = battV;
+    battMinIdx = (battMinIdx + 1) % 21;
+    if (battMinCount < 21) battMinCount++;
+  }
+  auto minAgo = [](int steps) { return battMinHist[(battMinIdx + 21 - 1 - steps) % 21]; };
+  float trend5 = battMinCount > 10 ? battV - minAgo(10) : 0;   // over 5 min
+  float rise10 = battMinCount >= 21 ? battV - minAgo(20) : 1;  // over 10 min
+
+  bool usb = battUsbSense();
+  bool charging = battCharging;
+#if PIN_USB_SENSE >= 0
+  charging = usb;
+#else
+  if (usb) charging = true;
+  else if (battUsb) charging = false;  // unplugged from the computer
+  else if (!charging && (jump > 0.06f || (trend5 > 0.03f && since(battUnplugAt) > minutes(6)))) charging = true;
+  else if (charging && (jump < (battFull ? -0.03f : -0.06f) ||  // a full cell only drops a little
+                        (trend5 < -0.02f && since(battChargeStart) > minutes(6)))) charging = false;
+#endif
+  battUsb = usb;
+
+  if (charging != battCharging) {
+    battCharging = charging;
+    battMinCount = 0;  // start the trends fresh
+    battLastMinPush = now;
+    if (charging) battChargeStart = now;
+    else { battUnplugAt = now; battVSlow = battV; }
+  }
+
+  if (!charging) battFull = false;
+  else if (!battFull && battV >= BATT_FULL_V && rise10 < 0.01f) battFull = true;  // stopped rising
+
+  if (battFull) battPctEst = 100;
+  else if (!charging) {
+    float p = lipoPercent(battVSlow);
+    // On battery the number only goes down (no bouncing), except while the voltage settles after unplugging.
+    if (since(battUnplugAt) < 90000 || p < battPctEst) battPctEst = p;
+  }
+  battSetState(charging, battFull, battPctEst);
+}
+
+void battBegin() {
+#if ENABLE_BATTERY
+#if PIN_USB_SENSE >= 0
+  pinMode(PIN_USB_SENSE, INPUT);
+#endif
+  analogSetPinAttenuation(PIN_BATTERY, ADC_11db);
+  if (!battDividerFitted()) {
+    Serial.println(F("[batt] no voltage divider on PIN_BATTERY - battery features off (see config.h)"));
+    return;
+  }
+  float v = battReadVolts();
+  if (v < 2.5f) { Serial.printf("[batt] reads %.2f V - no battery? battery features off\n", v); return; }
+  battPresent = true;
+  battV = battVSlow = v;
+  for (auto &h : battSecHist) h = v;
+  battUsb = battUsbSense();
+  battCharging = battUsb || v > 4.22f || wokeFrom == OFF_BATTERY;  // woke up from empty = a charger was plugged in
+  uint32_t now = millis();
+  battChargeStart = battUnplugAt = battLastMinPush = now;
+  battPctEst = lipoPercent(v);
+  battNextNom = now + minutes(3);
+  battSetState(battCharging, false, battPctEst);
+#endif
+}
+
+void battStep() {  // once per second
+  if (!battPresent && !battFake) return;
+  uint32_t now = millis();
+  if (!battFake) battMeasure();
+
+  // Over-discharge protection
+  bool empty = battFake ? battPct == 0 : battV < BATT_SHUTDOWN_V;
+  if (battOnBattery() && empty) {
+    if (++battEmptyCount >= BATT_SHUTDOWN_S) powerOff(OFF_BATTERY, true);
+  } else {
+    battEmptyCount = 0;
+  }
+
+  if (calStage || bootPending || reacting()) return;
+  if ((battState == BATT_LOW || battState == BATT_CRITICAL) && reached(battNextNag)) hungry(battState == BATT_CRITICAL);
+  if (battState == BATT_CHARGING && activity == ACT_AWAKE && reached(battNextNom)) {  // happy munching
+    battNextNom = now + random(240000, 480000);
+    react(faceWith(HAPPY), 1500);
+    chatter(SND_NOM);
+  }
+}
+
+// ---- power off (deep sleep) ----
+void powerOff(OffReason why, bool animate) {
+  Serial.printf("[power] switching off (%s)\n", why == OFF_BATTERY ? "battery empty" : "goodnight");
+  if (animate && activity != ACT_HIDING) {
+    hush();
+    Face f; f.mood = TIRED;
+    react(f, 10000);
+    lookAt(0, 0.3f);
+    if (why == OFF_BATTERY) battText("too hungry...", "plug me in! zzz", 0);
+    else battText("goodnight!", "move me to wake", 0);
+    say(SND_GOODNIGHT, 1, true);
+    delay(2800);
+    { BusLock lock; eyes.close(); }
+    delay(900);
+  }
+  hush();
+  saveMemory();
+
+  rtcOffReason = why;
+  rtcOffVolt = battPresent ? battV : 0;
+  rtcImuAddr = imuOk ? imuAddr : 0;
+  if (imuOk) {
+    float m = sqrtf(rawAcc[0] * rawAcc[0] + rawAcc[1] * rawAcc[1] + rawAcc[2] * rawAcc[2]);
+    for (int i = 0; i < 3; i++) rtcOffGrav[i] = m > 0.1f ? rawAcc[i] / m : 0;
+  }
+
+  xSemaphoreTakeRecursive(busMutex, portMAX_DELAY);  // stops the eyes task for good
+  oledCommand(OLED_OFF_CMD);
+  if (imuOk) imuWrite(0x6B, 0x40);  // motion sensor to sleep
+  noTone(PIN_BUZZER);
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup((uint64_t)(why == OFF_BATTERY ? BATT_OFF_CHECK_S : OFF_CHECK_S) * 1000000ULL);
+  esp_deep_sleep_start();
+}
+
+// First thing at boot: if we were "off", take a quick look and go back to sleep
+// unless someone moved the pet or plugged in a charger. Takes a few ms.
+void offModeCheck() {
+  if (rtcOffReason == OFF_NONE) return;
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) { rtcOffReason = OFF_NONE; return; }  // RESET / power cycle
+
+  bool wake = false;
+#if ENABLE_BATTERY
+  float v = battReadVolts();
+  if (rtcOffVolt > 2.5f && v > 2.5f) {
+    if (v > rtcOffVolt + 0.25f) wake = true;                                // charger plugged in
+    else if (rtcOffReason == OFF_USER && v < BATT_SHUTDOWN_V) rtcOffReason = OFF_BATTERY;  // drained while off
+  }
+#endif
+  if (!wake && rtcOffReason == OFF_USER && rtcImuAddr) {
+    Wire.begin(PIN_SDA, PIN_SCL);
+    imuAddr = rtcImuAddr;
+    imuWrite(0x6B, 0x00);  // wake the sensor for one reading
+    delay(30);
+    uint8_t b[6];
+    bool ok = imuRead(0x3B, b, 6);
+    imuWrite(0x6B, 0x40);
+    if (ok) {
+      float a[3], m = 0;
+      for (int i = 0; i < 3; i++) { a[i] = (int16_t)(b[i * 2] << 8 | b[i * 2 + 1]); m += a[i] * a[i]; }
+      m = sqrtf(m);
+      float dot = 0;
+      if (m > 0) for (int i = 0; i < 3; i++) dot += a[i] / m * rtcOffGrav[i];
+      if (dot < cosf(OFF_WAKE_DEG * DEG_TO_RAD)) wake = true;  // turned / picked up
+    }
+  }
+  if (wake) {
+    wokeFrom = (OffReason)rtcOffReason;
+    rtcOffReason = OFF_NONE;
+    return;
+  }
+  esp_sleep_enable_timer_wakeup((uint64_t)(rtcOffReason == OFF_BATTERY ? BATT_OFF_CHECK_S : OFF_CHECK_S) * 1000000ULL);
+  esp_deep_sleep_start();
+}
+
+void printBattery() {
+  if (!battPresent && !battFake) { Serial.println(F("battery: not measured (no divider on PIN_BATTERY)")); return; }
+  Serial.printf("battery: %s %d%%  %.3f V (slow %.3f)  usb=%d%s\n", BATT_NAMES[battState], battPct, battV, battVSlow,
+                battUsb, battFake ? "  [fake]" : "");
+}
+
+// =====================================================================
 //  SERIAL CONSOLE (115200 baud) - for testing and tuning
 // =====================================================================
 void printStatus() {
@@ -1636,12 +2051,14 @@ void printStatus() {
                 present(), breakDue, workActive ? (unsigned long)(since(workStart) / 60000) : 0UL,
                 (unsigned long)(since(lastInteraction) / 1000), chattiness, muted, imuOk, imuCalibrated, OVERLAY_NAMES[overlay]);
   Serial.printf("gyro bias %.2f %.2f %.2f dps\n", gyroBias[0], gyroBias[1], gyroBias[2]);
+  printBattery();
 }
 
 void printHelp() {
   Serial.println(F("commands: status imu calibrate calreset mute unmute chatty <0-3> sleep wake pet boop sing"));
   Serial.println(F("          scare annoy dizzy"));
   Serial.println(F("          hiccup sneeze greet break birthday happy sad angry sound <id> reset"));
+  Serial.println(F("          batt  off  fakebatt <0-100|charging|full|auto>"));
 }
 
 void runCommand(String cmd) {
@@ -1673,6 +2090,18 @@ void runCommand(String cmd) {
   else if (cmd == "angry") react(faceWith(ANGRY), 3000);
   else if (cmd.startsWith("sound ")) { int id = cmd.substring(6).toInt(); xQueueSend(soundQueue, &id, 0); }
   else if (cmd == "reset") { happiness = 70; energy = 90; saveMemory(); }
+  else if (cmd == "batt" || cmd == "battery") printBattery();
+  else if (cmd == "off") powerOff(OFF_USER, true);
+  else if (cmd.startsWith("fakebatt ")) {
+    String a = cmd.substring(9);
+    if (a == "auto") { battFake = false; Serial.println(F("battery: measuring again")); }
+    else {
+      battFake = true;
+      if (a == "charging") battSetState(true, false, battPct);
+      else if (a == "full") battSetState(true, true, 100);
+      else battSetState(false, false, constrain(a.toInt(), 0, 100));
+    }
+  }
   else if (cmd.length()) { Serial.print(F("unknown: ")); Serial.println(cmd); printHelp(); }
 }
 
@@ -1700,6 +2129,7 @@ void serialStep() {
 //  SETUP / LOOP
 // =====================================================================
 void setup() {
+  offModeCheck();  // if we were switched off: only wake up when moved / plugged in
   Serial.begin(115200);
   randomSeed(esp_random());
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -1722,6 +2152,7 @@ void setup() {
 
   cute.init(PIN_BUZZER);
   loadMemory();
+  battBegin();
 
   eyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, EYES_FPS);
   eyes.autoDisplayEnabled = false;  // the eyes task pushes the frame after drawing overlays
@@ -1774,6 +2205,8 @@ void loop() {
       react(faceWith(HAPPY), 1500);
       laughEyes();
       say(SND_BOOT);
+      if (wokeFrom == OFF_USER) showOverlay(OV_HEARTS, 1800);  // good morning!
+      else if (wokeFrom == OFF_BATTERY) battText("FOOD!! thank you!", "nom nom nom", 2500);
     }
     vTaskDelay(1);
     return;
@@ -1801,7 +2234,7 @@ void loop() {
     baselineFace();
     gazeStep();
   }
-  if (now - lastNeeds >= 1000) { lastNeeds = now; needsTick(); }
+  if (now - lastNeeds >= 1000) { lastNeeds = now; needsTick(); battStep(); }
   if (now - lastAge >= 60000) { lastAge = now; ageTick(); }
   if (now - lastSave >= minutes(SAVE_EVERY_MIN)) { lastSave = now; saveMemory(); }
 

@@ -89,6 +89,39 @@
 #define BREAK_NAG_EVERY_MIN 5
 #define BREAK_RESET_MIN    5       // this long without desk activity = you took a break
 
+// ---------------- Battery (1S LiPo on the XIAO's BAT+/BAT- pads) ---------
+// The XIAO charges the LiPo by itself, but has no way to measure it. Add a
+// voltage divider:   BAT+ --[220k]-- D0 --[220k]-- GND   (+ 100nF from D0 to GND
+// for steadier readings). Without the divider the battery features switch
+// themselves off at boot (the pin is checked).
+#define ENABLE_BATTERY     1
+#define PIN_BATTERY        D0      // A0 / GPIO2
+#define BATT_DIVIDER       2.0f    // (R1 + R2) / R2
+#define BATT_CAL           1.00f   // multimeter volts / "batt" reading, to fine-tune
+// Optional real "plugged in" signal: 5V pin --[10k]-- D6 --[20k]-- GND.
+// Without it, charging is detected from USB-to-computer and from the voltage
+// jumping up / down when the cable goes in / out.
+#define PIN_USB_SENSE      -1      // -1 = not fitted, else e.g. D6
+
+#define BATT_LOW_PCT       20      // "I'm hungry..."
+#define BATT_CRITICAL_PCT  7       // "feed me!", screen dims
+#define BATT_NAG_MIN       10      // repeat the hungry reminder (critical: every 3 min)
+#define BATT_FULL_V        4.15f   // charging, above this and no longer rising = full
+
+// Over-discharge protection: below this (for BATT_SHUTDOWN_S seconds) the pet says
+// goodnight and goes into deep sleep (~0.1 mA), checking once a minute whether a
+// charger was plugged in. 3.3 V leaves the cell some reserve so it isn't damaged.
+#define BATT_SHUTDOWN_V    3.30f
+#define BATT_SHUTDOWN_S    20
+#define BATT_OFF_CHECK_S   60
+
+// ---------------- Power off -------------------------------------------------
+// "Off" = deep sleep with the screen and motion sensor powered down.
+// It wakes up when you move / turn it (or press RESET, or plug in a charger).
+#define AUTO_OFF_FACEDOWN_MIN 5    // on battery: lying face down this long = switch off (0 = never)
+#define OFF_CHECK_S        2       // how often the sleeping pet checks whether it was moved
+#define OFF_WAKE_DEG       30.0f   // that much turning wakes it up
+
 // ---------------- Memory -------------------------------------------------
 #define REMEMBER_MOOD      1       // keep happiness/energy/age in flash across power cycles
 #define SAVE_EVERY_MIN     15
