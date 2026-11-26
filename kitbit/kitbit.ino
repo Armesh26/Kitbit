@@ -1605,12 +1605,14 @@ bool repeatBusy() {
 
 bool beatClear() { return ears.st.beatAvg >= SING_MIN_BEAT; }
 
-// Pluck the root of the current (stable) chord, in the buzzer's clear range.
-void playBass() {
+// Hold the root of the current (stable) chord, in the buzzer's clear range. Not for the
+// whole chord: the mic can't listen while the buzzer plays, it needs a gap to hear the
+// next chord change.
+void playBass(uint32_t span) {
 #if BASS_ALONG
   if (ears.st.bass < 0 || chattiness < 2 || muted) return;
   int midi = SING_BASE_MIDI + ((ears.st.bass - SING_BASE_MIDI) % 12 + 12) % 12;
-  sayNote(midi, BASS_NOTE_MS, 2);
+  sayNote(midi, constrain((uint32_t)(span * BASS_SUSTAIN), 150UL, (uint32_t)BASS_MAX_MS), 2);
 #endif
 }
 
@@ -1643,7 +1645,7 @@ void onBeat(uint32_t n, uint32_t period) {
   if (bar < SING_BARS_ON) singSongNote(beat, min<uint32_t>(period * 55 / 100, 260));
 #endif
 #if BASS_ALONG
-  if (n % 2 == 0) playBass();  // beats 1 and 3 of the bar
+  if (n % 2 == 0) playBass(period * 2);  // beats 1 and 3 of the bar, held ~1.4 beats
 #endif
 }
 
@@ -1689,7 +1691,7 @@ void musicStep() {
     static uint32_t seenChanges = 0, lastPluck = 0;
     if (ears.st.bassChanges != seenChanges) {
       seenChanges = ears.st.bassChanges;
-      if (now - lastPluck > 400) { playBass(); lastPluck = now; }
+      if (now - lastPluck > 400) { playBass(ears.st.chordMs ? ears.st.chordMs : 1500); lastPluck = now; }
     }
 #endif
     return;

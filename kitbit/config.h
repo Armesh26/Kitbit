@@ -206,7 +206,8 @@
 // weak beat: whenever the chord changes. Only chords of the detected key, and only
 // when one chord clearly wins - otherwise it stays quiet.
 #define BASS_ALONG         1
-#define BASS_NOTE_MS       120
+#define BASS_SUSTAIN       0.70f   // hold the note this share of the chord (the rest: listening for the next one)
+#define BASS_MAX_MS        1400
 #define BASS_MARGIN        0.03f   // how clearly the best chord must beat the next one
 #define REPEAT_AFTER_ME    0       // 1 = whistle / hum a short tune and it plays it back
 // Someone singing / humming also makes it dance: share of the last second spent on held

@@ -33,6 +33,7 @@ struct EarsState {          // read by the pet (written by the mic task)
   int8_t bass = -1;         // stable chord root: only chords of the key, clear winner, held ~0.25 s (-1 = unsure)
   bool bassMinor = false;
   uint32_t bassChanges = 0; // counts chord changes
+  uint32_t chordMs = 0;     // typical time between chord changes
   bool pitch = false;       // a steady single pitch (whistle / hum) right now
   float pitchMidi = 0;
   uint8_t pitchKind = 0;    // 1 = whistle, 2 = hum
@@ -45,6 +46,8 @@ class Ears {
 
   void reset() {
     dec = decN = 0;
+    lp1 = Biquad();
+    lp2 = Biquad();
     st.pitchKind = 0;
     gN = 0;
     for (auto &g : gs) g.s1 = g.s2 = 0;
@@ -64,6 +67,19 @@ class Ears {
     st.pitch = false;
   }
 
+  // Butterworth low-pass, fs 16 kHz, fc 1.5 kHz, Q14 coefficients; two in a row = 4th order.
+  struct Biquad { int32_t x1 = 0, x2 = 0, y1 = 0, y2 = 0; };
+  Biquad lp1, lp2;
+  static int32_t biquad(Biquad &q, int32_t x) {
+    const int32_t B0 = 991, B1 = 1983, B2 = 991, A1 = -19562, A2 = 7143;
+    int64_t acc = (int64_t)B0 * x + (int64_t)B1 * q.x1 + (int64_t)B2 * q.x2 - (int64_t)A1 * q.y1 - (int64_t)A2 * q.y2;
+    int32_t y = (int32_t)(acc >> 14);
+    q.x2 = q.x1; q.x1 = x;
+    q.y2 = q.y1; q.y1 = y;
+    return y;
+  }
+  int32_t lowpass(int32_t x) { return biquad(lp2, biquad(lp1, x)); }
+
   void begin() {
     for (int i = 0; i < NOTES; i++) {
       float f = 440.0f * powf(2.0f, (MIDI_LO + i - 69) / 12.0f);
@@ -77,15 +93,16 @@ class Ears {
     sampleIdx++;
     dirty |= selfSound;
     whistleSample(v, now);
-    dec += v;
+    // Anti-alias low-pass (2 x biquad, 1.5 kHz) before going down to 4 kHz: without it,
+    // overtones above 2 kHz fold back as fake notes and wreck key / chord detection.
+    int32_t x = lowpass(v >> 6);  // same scale as before (24-bit -> ~18-bit), 64-bit maths inside
     if (++decN < 4) return;
-    int32_t x = constrain(dec >> 8, -32767, 32767);  // 4 kHz, 16-bit
-    dec = decN = 0;
-    decimated(x, now);
+    decN = 0;
+    decimated(constrain(x, -32767, 32767), now);  // 4 kHz, 16-bit
   }
 
  private:
-  static const int MIDI_LO = 55, NOTES = 36;  // G3 .. F#6
+  static const int MIDI_LO = 55, NOTES = 30;  // G3 .. C6 (well below the 1.5 kHz low-pass)
   static const int GN = 512;                  // Goertzel block: 128 ms at 4 kHz
   static const int OHOP = 64;                 // onset frame: 16 ms at 4 kHz
   static const int ON = 256;                  // onset history: 4.1 s
@@ -99,6 +116,7 @@ class Ears {
   int8_t bassCand = -1;
   bool bassCandMinor = false;
   int bassCandN = 0;
+  uint32_t lastBassChange = 0;
   int keyChallenge = 0;
   // onsets
   float onset[ON];
@@ -312,7 +330,15 @@ class Ears {
     bool m = mn[bestI];
     if (r == st.bass && m == st.bassMinor) { bassCandN = 0; return; }
     if (r == bassCand && m == bassCandMinor) {
-      if (++bassCandN >= 2) { st.bass = r; st.bassMinor = m; st.bassChanges = st.bassChanges + 1; bassCandN = 0; }
+      if (++bassCandN >= 2) {
+        uint32_t now = millis();
+        if (lastBassChange) {  // how long chords last in this song (for sustained notes)
+          uint32_t d = constrain(now - lastBassChange, 300UL, 4000UL);
+          st.chordMs = st.chordMs ? (st.chordMs * 3 + d) / 4 : d;
+        }
+        lastBassChange = now;
+        st.bass = r; st.bassMinor = m; st.bassChanges = st.bassChanges + 1; bassCandN = 0;
+      }
     } else {
       bassCand = r; bassCandMinor = m; bassCandN = 1;
     }
