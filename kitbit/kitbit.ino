@@ -1141,7 +1141,8 @@ void imuStep() {
   // No taps while (or right after) being scratched: every stroke sounds like a click.
   // A tap group that looked scratchy at any point is thrown away.
   static bool tapGroupScratchy = false;
-  bool scratchSuspect = scratching || now - scratchEndMs < 600 || __builtin_popcount(scratchBits & 0x1F) >= 3;
+  // Taps leave quiet windows between them (1-0-1-0-1); scratching is continuous (1-1-1).
+  bool scratchSuspect = scratching || now - scratchEndMs < 600 || (scratchBits & 0x7) == 0x7;
   if (scratchSuspect && tapCount) tapGroupScratchy = true;
   if (scratching) tapCount = 0;
   if (!tapCount) tapGroupScratchy = false;
