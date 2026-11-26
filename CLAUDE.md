@@ -70,7 +70,11 @@ First check that the 5V pin reads about 0 V when the board runs on battery alone
 ## Power
 
 - **"Off"** is deep sleep. It is entered three ways: face down plus a double tap (handled in `onTaps` while hiding), automatically after `AUTO_OFF_FACEDOWN_MIN` face down on battery, or with the serial command `off`.
-- **Waking from "off"** works like this. The timer wakes the chip every `OFF_CHECK_S` seconds. If the pet has moved more than `OFF_WAKE_DEG`, `offListenForDoubleTap()` shows "tap tap to wake" and listens with the IMU for `OFF_LISTEN_MS`; a double tap boots it fully. A charger does **not** wake a pet that was switched off by hand; it only wakes one that shut down on an empty battery. RESET always wakes it.
+- **Waking from "off"** happens only when a charger is plugged in, or on RESET, because jostling in a bag used to trigger the tap wake. `offModeCheck()` runs every `OFF_CHECK_S` seconds and looks for three things:
+  - the battery voltage rising more than `OFF_CHARGE_RISE_V` above the slowly tracked rest voltage
+  - the optional `PIN_USB_SENSE`
+  - every 4th check, a 300 ms look for a *new* USB host, via the start-of-frame counter in `USB_SERIAL_JTAG_FRAM_NUM_REG`
+  The flip + double-tap wake (`offListenForDoubleTap()`) is still in the code behind `OFF_WAKE_BY_TAP`.
 - **Below `BATT_SHUTDOWN_V` (3.3 V) for 20 s**, it goes into a protective deep sleep and checks every 60 s for a charger.
 - **`offModeCheck()`** runs first in `setup()` and returns to sleep quickly when there is no reason to wake.
 

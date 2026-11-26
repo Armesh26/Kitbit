@@ -41,6 +41,7 @@
 #include <freertos/semphr.h>
 #include <esp_sleep.h>
 #include <driver/gpio.h>
+#include <soc/usb_serial_jtag_reg.h>
 #include "config.h"
 #if ENABLE_MIC
 #include <ESP_I2S.h>
@@ -2172,6 +2173,9 @@ void calibrationStep() {
 // =====================================================================
 RTC_DATA_ATTR uint8_t rtcOffReason = OFF_NONE;  // survives deep sleep
 RTC_DATA_ATTR float rtcOffVolt = 0;
+RTC_DATA_ATTR float rtcRestVolt = 0;  // battery voltage while off, followed slowly (it relaxes upwards)
+RTC_DATA_ATTR bool rtcUsbWas = false;  // computer on USB when it went off / at the last look
+RTC_DATA_ATTR uint32_t rtcOffChecks = 0;
 RTC_DATA_ATTR float rtcOffGrav[3] = {0, 0, 0};
 RTC_DATA_ATTR uint8_t rtcImuAddr = 0;
 OffReason wokeFrom = OFF_NONE;
@@ -2464,7 +2468,7 @@ void powerOff(OffReason why, bool animate) {
     react(f, 10000);
     lookAt(0, 0.3f);
     if (why == OFF_BATTERY) battText("too hungry...", "plug me in! zzz", 0);
-    else battText("goodnight!", "flip + tap tap", 0);
+    else battText("goodnight!", "plug me in to wake", 0);
     say(SND_GOODNIGHT, 1, true);
     delay(2800);
     { BusLock lock; eyes.close(); }
@@ -2475,6 +2479,9 @@ void powerOff(OffReason why, bool animate) {
 
   rtcOffReason = why;
   rtcOffVolt = battPresent ? battV : 0;
+  rtcRestVolt = 0;
+  rtcUsbWas = battUsbSense();
+  rtcOffChecks = 1;  // the first look at USB comes ~12 s after switching off
   rtcImuAddr = imuOk ? imuAddr : 0;
   if (imuOk) {
     float m = sqrtf(rawAcc[0] * rawAcc[0] + rawAcc[1] * rawAcc[1] + rawAcc[2] * rawAcc[2]);
@@ -2490,6 +2497,7 @@ void powerOff(OffReason why, bool animate) {
   esp_deep_sleep_start();
 }
 
+#if OFF_WAKE_BY_TAP
 // While "off" and just moved: show sleepy eyes + "tap tap to wake" and listen for a
 // double tap with the IMU alone (the mic task isn't running yet). True = wake up.
 static bool offListenForDoubleTap() {
@@ -2560,8 +2568,22 @@ static bool offListenForDoubleTap() {
   return woke;
 }
 
+#endif
+
+// Is a computer on the USB port? It sends a start-of-frame every 1 ms once it has
+// noticed the board again after the deep sleep (100-200 ms). A phone charger sends nothing.
+static bool usbHostPresent() {
+  uint32_t f0 = REG_READ(USB_SERIAL_JTAG_FRAM_NUM_REG) & USB_SERIAL_JTAG_SOF_FRAME_INDEX;
+  for (int i = 0; i < 150; i++) {
+    delay(2);
+    if ((REG_READ(USB_SERIAL_JTAG_FRAM_NUM_REG) & USB_SERIAL_JTAG_SOF_FRAME_INDEX) != f0) return true;
+  }
+  return false;
+}
+
 // First thing at boot: if we were "off", take a quick look and go back to sleep.
-//  - switched off by hand: wake only for "moved, then double-tapped"
+//  - switched off by hand: wake when a charger / computer is plugged in
+//    (and, with OFF_WAKE_BY_TAP, for "moved, then double-tapped")
 //  - battery empty: wake only when a charger was plugged in
 void offModeCheck() {
   if (rtcOffReason == OFF_NONE) return;
@@ -2573,8 +2595,25 @@ void offModeCheck() {
   if (rtcOffVolt > 2.5f && v > 2.5f) {
     if (rtcOffReason == OFF_BATTERY && v > rtcOffVolt + 0.25f) wake = true;              // charger plugged in
     else if (rtcOffReason == OFF_USER && v < BATT_SHUTDOWN_V) rtcOffReason = OFF_BATTERY;  // drained while off
+    else if (rtcOffReason == OFF_USER) {
+      if (rtcRestVolt < 2.5f) rtcRestVolt = v;
+      if (v > rtcRestVolt + OFF_CHARGE_RISE_V) wake = true;  // voltage jumped: a charger was plugged in
+      else rtcRestVolt += (v - rtcRestVolt) * 0.3f;          // follow the slow relaxation of the cell
+    }
   }
 #endif
+#if PIN_USB_SENSE >= 0
+  pinMode(PIN_USB_SENSE, INPUT);
+  if (!wake && rtcOffReason == OFF_USER && digitalRead(PIN_USB_SENSE)) wake = true;
+#endif
+  // Plugged into a computer (only a NEW connection counts: it may have been switched off
+  // while on USB). Looking takes ~300 ms, so only every 4th check.
+  if (!wake && rtcOffReason == OFF_USER && rtcOffChecks++ % 4 == 0) {
+    bool usb = usbHostPresent();
+    if (usb && !rtcUsbWas) wake = true;
+    rtcUsbWas = usb;
+  }
+#if OFF_WAKE_BY_TAP
   if (!wake && rtcOffReason == OFF_USER && rtcImuAddr) {
     Wire.begin(PIN_SDA, PIN_SCL);
     imuAddr = rtcImuAddr;
@@ -2594,6 +2633,7 @@ void offModeCheck() {
     if (moved) wake = offListenForDoubleTap();
     else imuWrite(0x6B, 0x40);
   }
+#endif
   if (wake) {
     wokeFrom = (OffReason)rtcOffReason;
     rtcOffReason = OFF_NONE;
