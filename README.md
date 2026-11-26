@@ -88,7 +88,7 @@ The XIAO can't measure its battery by itself, so the voltage divider on D0 is ne
 
 | What happens | KitBit does |
 |---|---|
-| You plug in the charger | "yum! charging", munching sounds, happy eyes. A small battery icon at the bottom of the screen keeps filling up. If it was hungry: "FOOD!! thank you!" |
+| You plug in the charger | Munching sounds and happy eyes. A small battery icon at the bottom of the screen keeps filling up. |
 | It's charging | It doesn't get tired, gets a little happier, and now and then goes "nom nom" |
 | It's full | "I'm full! *burp*", then a full battery icon that sparkles |
 | You unplug it | "unplugged! wheee" with the battery %, or "hey! I'm still hungry..." if it's low |

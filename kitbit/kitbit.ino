@@ -2601,7 +2601,6 @@ void onPluggedIn(BattState old) {
   interact();
   react(faceWith(HAPPY), 2500);
   laughEyes();
-  battText(starving ? "FOOD!! thank you!" : "yum! charging", starving ? "nom nom nom" : "", 2500);
   say(SND_NOM, 1, true);
   addHappiness(starving ? 10 : 3);
 }
