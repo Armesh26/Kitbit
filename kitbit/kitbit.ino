@@ -1720,6 +1720,7 @@ bool battCharging = false, battFull = false, battUsb = false;
 const char *battWhy = "boot";  // why it thinks it is / isn't charging (shown by "batt")
 uint32_t battChargeStart = 0, battUnplugAt = 0, battNextNag = 0, battNextNom = 0;
 uint8_t battEmptyCount = 0;
+uint32_t battJumpAt = 0;  float battJumpBase = 0;  // a possible plug-in, waiting to be confirmed
 bool battFake = false;   // serial "fakebatt" for trying the reactions
 float battPctEst = 100;
 char battMsg1[22], battMsg2[22];
@@ -1739,8 +1740,8 @@ float lipoPercent(float v) {
 float battReadVolts() {
 #if ENABLE_BATTERY
   uint32_t mv = 0;
-  for (int i = 0; i < 16; i++) mv += analogReadMilliVolts(PIN_BATTERY);
-  return mv / 16000.0f * BATT_DIVIDER * BATT_CAL;
+  for (int i = 0; i < 64; i++) mv += analogReadMilliVolts(PIN_BATTERY);  // average out ADC noise
+  return mv / 64000.0f * BATT_DIVIDER * BATT_CAL;
 #else
   return 0;
 #endif
@@ -1893,8 +1894,15 @@ void battMeasure() {
 #else
   if (usb) { charging = true; why = "USB computer connected"; }
   else if (battUsb) { charging = false; why = "USB computer disconnected"; }
-  else if (!charging && jump > 0.06f) { charging = true; why = "voltage jumped up"; }
-  else if (!charging && trend5 > 0.03f && since(battUnplugAt) > minutes(6)) { charging = true; why = "voltage rising for 5 min"; }
+  // A charger pushes the voltage up quickly and keeps it up. A battery that just has less
+  // to do (asleep, dimmed screen) also creeps up a bit, so: bigger thresholds, and a jump
+  // only counts if it is still there 20 s later.
+  else if (!charging && battJumpAt && since(battJumpAt) >= 20000) {
+    if (battV - battJumpBase > 0.07f) { charging = true; why = "voltage jumped up and stayed up"; }
+    battJumpAt = 0;
+  }
+  else if (!charging && !battJumpAt && jump > 0.08f) { battJumpAt = now; battJumpBase = oldest; }
+  else if (!charging && trend5 > 0.07f && since(battUnplugAt) > minutes(6)) { charging = true; why = "voltage rising for 5 min"; }
   else if (charging && jump < (battFull ? -0.03f : -0.06f)) { charging = false; why = "voltage dropped"; }  // a full cell only drops a little
   else if (charging && trend5 < -0.01f && since(battChargeStart) > minutes(3)) { charging = false; why = "voltage falling"; }
 #endif
@@ -1905,6 +1913,7 @@ void battMeasure() {
 
   if (charging != battCharging) {
     battCharging = charging;
+    battJumpAt = 0;
     battMinCount = 0;  // start the trends fresh
     battLastMinPush = now;
     if (charging) battChargeStart = now;
