@@ -1372,7 +1372,7 @@ void onOrientChanged(Orient from, Orient to) {
     case OR_LYING_RIGHT:
       lieDownSince = now;  // bedtime gesture: falls asleep if left lying down
       if (activity == ACT_AWAKE || activity == ACT_DROWSY) {
-        react(faceWith(TIRED), 2000);
+        react(faceWith(DEFAULT), 1500);  // sleepy, not sad: the eyes squint shut in activityStep
         say(SND_YAWN, 2);
       }
       break;
@@ -1530,6 +1530,23 @@ void activityStep() {
   uint32_t now = millis();
   uint32_t quietFor = min(since(lastInteraction), imuOk ? since(lastPresence) : 0UL);
   bool lying = (orient == OR_LYING_LEFT || orient == OR_LYING_RIGHT);
+
+  // Bedtime: lying on its side, the eyes slowly squint shut until it falls asleep.
+  static bool squinting = false;
+  if (lying && activity == ACT_AWAKE) {
+    float p = clampf(since(lieDownSince) / 6000.0f, 0, 1);
+    int h = EYE_H - (int)((EYE_H - 8) * p);
+    static int lastH = 0;
+    if (!squinting || abs(h - lastH) >= 2) {
+      BusLock lock;
+      eyes.setHeight(h, h);
+      lastH = h;
+    }
+    squinting = true;
+  } else if (squinting) {  // picked up again (or fell asleep): normal eyes
+    squinting = false;
+    faceDirty = true;
+  }
 
   switch (activity) {
     case ACT_AWAKE:
