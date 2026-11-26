@@ -44,8 +44,8 @@
 // Pick which sensor axis (0 = X, 1 = Y, 2 = Z) and sign maps to each body axis.
 // Default: MPU board lying flat in the base, chip facing up, sensor +X to the right,
 // sensor +Y pointing to the back of the pet.
-// These are only the fallback: run the calibration (serial "calibrate" or 6 quick
-// taps) and the exact mounting - any angle - is measured and saved to flash.
+// These are only the fallback: run the calibration (serial "calibrate") and the exact
+// mounting - any angle - is measured and saved to flash.
 // Check with the serial command "imu": standing upright should show  up ~ +1.00
 #define IMU_RIGHT_AXIS     0
 #define IMU_RIGHT_SIGN     (+1)

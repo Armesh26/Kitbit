@@ -14,7 +14,7 @@
 //
 //  What it does (see README.md for the full list):
 //   - eyes roll towards whichever side you tilt it
-//   - "calibrate" (serial) or 6 quick taps: learns how the sensor is mounted, saved to flash
+//   - "calibrate" (serial): learns how the sensor is mounted, saved to flash
 //   - tap = boop, double tap = pet (hearts), triple tap = it sings
 //   - shake / spin it -> dizzy, shake too long -> grumpy
 //   - drop it -> screams, then "oof"
@@ -869,15 +869,25 @@ void imuStep() {
   // --- taps and knocks (only while resting) ---
   float tapG = kick >= 0 ? kick : (fifoOk ? 0 : jerk);
   if (tapG > tapPeak) tapPeak = tapG;
-  if (!handling && !falling && !shaking && now - lastTapCandMs > TAP_DEBOUNCE_MS) {
+  // The buzzer shakes the case: its own sounds must not count as taps.
+  static uint32_t lastSoundMs = 0;
+  if (soundPlaying) lastSoundMs = now;
+  bool quietSpeaker = now - lastSoundMs > 150;
+  // One tap = one count: after a tap the case rings for a bit, so the next tap can
+  // only count once the sensor has calmed down again (below half the threshold).
+  static bool tapArmed = true;
+  if (!tapArmed && tapG < TAP_G * 0.5f && now - lastTapCandMs > TAP_DEBOUNCE_MS) tapArmed = true;
+  if (tapArmed && quietSpeaker && !handling && !falling && !shaking) {
     if (tapG > BUMP_G) {
       ev.bump = true;
       lastTapCandMs = now;
+      tapArmed = false;
       tapCount = 0;
     } else if (tapG > TAP_G) {
       tapCount++;
       tapSide += kick >= 0 ? toBody(kickDir).x : dyn.x;
       lastTapMs = lastTapCandMs = now;
+      tapArmed = false;
     }
   }
   if (tapCount && now - lastTapMs > TAP_WINDOW_MS) {
@@ -1108,7 +1118,6 @@ void celebrateBirthday() {
 
 void onTaps(uint8_t n, float side) {
   if (activity == ACT_HIDING) return;
-  if (n >= 6) { interact(); startCalibration(); return; }  // 6 quick taps = calibrate mounting
 
   if (since(recentTapsSince) > 10000) { recentTapsSince = millis(); recentTaps = 0; }
   recentTaps += n;

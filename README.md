@@ -32,7 +32,7 @@ The motion sensor is driven directly (no MPU library), so clone "MPU6050" boards
 
 ### Calibrate the sensor mounting (once)
 
-The pet needs to know which way the sensor is mounted inside it. Start calibration by typing `calibrate` in the serial monitor (115200 baud), or by **tapping the pet 6 times quickly**. The screen walks you through it:
+The pet needs to know which way the sensor is mounted inside it. Start calibration by typing `calibrate` in the serial monitor (115200 baud). There's no tap gesture for it: it got triggered by accident. The screen walks you through it:
 
 1. **"stand me upright"**: put it in its normal pose on the desk and let go. After about 1.5 s of stillness it beeps.
 2. **"lay me on my back"**: lay it down with the screen facing the ceiling and let go. After about 1.5 s it says "Calibrated!".
