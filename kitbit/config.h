@@ -183,6 +183,19 @@
 #define OFF_TAP_G          0.10f   // jolt that counts as a tap while it is listening (IMU only)
 #define HIDE_TAP_G         0.06f   // face down a tap on its back is soft
 
+// ---------------- Music: dance + sing along, repeat whistles / hums -------
+// Needs the INMP441. Watch the serial command "ears" while playing music to tune.
+#define ENABLE_EARS        1
+#define MUSIC_MIN_DB       12.0f   // louder than the quiet room by this much...
+#define MUSIC_MIN_BEAT     0.15f   // ...with a regular beat (autocorrelation, 0..1)...
+#define MUSIC_MIN_TONAL    1.8f    // ...and clear notes (chroma max/mean; noise ~1.2)
+#define SING_ALONG         1       // hum chord notes on the beat (chattiness >= 2)
+#define SING_BASE_MIDI     88      // E6: the buzzer sounds best ~1.3-2.7 kHz (it resonates ~2.6/3.6 kHz)
+#define REPEAT_AFTER_ME    1       // whistle / hum a short tune and it plays it back
+#define REPEAT_START_MS    400     // a steady pitch this long starts listening
+#define REPEAT_END_MS      900     // this long without a pitch ends the tune
+#define REPEAT_MAX_MS      8000
+
 // ---------------- Memory -------------------------------------------------
 #define REMEMBER_MOOD      1       // keep happiness/energy/age in flash across power cycles
 #define SAVE_EVERY_MIN     15

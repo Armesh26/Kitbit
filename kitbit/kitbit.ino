@@ -43,6 +43,7 @@
 #include <driver/gpio.h>
 #include <soc/usb_serial_jtag_reg.h>
 #include "config.h"
+#include "ears.h"
 #if ENABLE_MIC
 #include <ESP_I2S.h>
 #endif
@@ -155,6 +156,7 @@ struct BusLock {
 //  SOUND
 // =====================================================================
 #define SND_LIB_RESET 255  // not a CuteBuzzerSounds sound: play() with it only clears the library's stop flag
+#define SND_NOTE_FLAG 0x40000000  // id = flag | midi << 16 | ms : one note (midi 0 = rest)
 
 QueueHandle_t soundQueue;
 volatile bool soundAbort = false;
@@ -305,7 +307,12 @@ void soundTask(void *) {
     if (xQueueReceive(soundQueue, &id, portMAX_DELAY) == pdTRUE) {
       soundAbort = false;
       soundPlaying = true;
-      if (id < 100) {
+      if (id & SND_NOTE_FLAG) {  // a single note (singing along / repeating a tune)
+        cute.play(SND_LIB_RESET);
+        int midi = (id >> 16) & 0xFF, ms = id & 0xFFFF;
+        if (midi) tn(440.0f * powf(2.0f, (midi - 69) / 12.0f), ms, 0);
+        else hold(ms);
+      } else if (id < 100) {
         cute.play(id);
       } else {
         cute.play(SND_LIB_RESET);
@@ -572,6 +579,7 @@ I2SClass i2s;
 #endif
 volatile bool micOk = false;
 volatile bool micPauseReq = false, micPaused = false;  // face-down power save switches the mic off
+Ears ears;  // music + whistle / hum (ears.h), fed by the mic task
 volatile uint32_t micClickCount = 0;
 volatile uint32_t micClickTimes[8];  volatile float micClickPeaks[8];  // last 8 clicks, exact time
 volatile float micBg = 0, micPeakMax = 0;  // for the "mic" serial stream
@@ -579,6 +587,7 @@ volatile float micPeakDbg = 0;              // loudest chunk since the last tapd
 volatile float micPeakWin = 0;              // loudest chunk in the current 100 ms scratch window
 bool scratching = false;  uint32_t scratchStartMs = 0, scratchEndMs = 0;
 bool micStream = false;
+bool earsStream = false;  // "ears": music / pitch analysis twice a second
 bool tapDebug = false;  // "tapdebug": raw tap data at 100 Hz for tools/tap_test.py
 volatile uint32_t audioDumpUntil = 0;  // "audiodump <s>": raw mic audio over USB for tools/audio_dump.py
 
@@ -599,6 +608,7 @@ void micTask(void *) {
     }
     if (micPaused) {
       micStartI2S();
+      ears.reset();
       micPaused = false;
       armed = true;
       calmSince = 0;
@@ -638,6 +648,9 @@ void micTask(void *) {
     for (size_t j = 0; j < n; j += 32) {        // 2 ms chunks
       float peak = 0;
       for (size_t k = j; k < j + 32 && k < n; k++) {
+#if ENABLE_EARS
+        ears.feed(buf[k] >> 8, !speakerQuiet, now);
+#endif
         float x = (float)(buf[k] >> 8);         // 24-bit sample
         hp = x - prevX + 0.95f * hp;            // high-pass: drop DC and rumble
         prevX = x;
@@ -687,7 +700,8 @@ void micBegin() {
     return;
   }
   // Above the eyes task: tiny work per block, and its click times must be on time.
-  xTaskCreatePinnedToCore(micTask, "mic", 4096, NULL, 3, NULL, 0);
+  ears.begin();
+  xTaskCreatePinnedToCore(micTask, "mic", 8192, NULL, 3, NULL, 0);
 #endif
 }
 
@@ -1569,6 +1583,177 @@ void powerSaveStep() {
   esp_sleep_enable_timer_wakeup((uint64_t)PS_WAKE_MS * 1000ULL);
   esp_light_sleep_start();
 }
+
+// ---- music: dance on the beat, hum chord notes along; repeat whistled / hummed tunes ----
+void sayNote(int midi, uint32_t ms, uint8_t level) {
+  say(SND_NOTE_FLAG | (constrain(midi, 0, 127) << 16) | (int)min<uint32_t>(ms, 0xFFFF), level);
+}
+
+extern uint8_t calStage;  // (calibration section, further down)
+bool dancing = false;
+#if REPEAT_AFTER_ME
+enum { RP_IDLE, RP_LISTEN, RP_PLAY };
+uint8_t rpState = RP_IDLE;
+#endif
+bool repeatBusy() {
+#if REPEAT_AFTER_ME
+  return rpState != RP_IDLE;
+#else
+  return false;
+#endif
+}
+
+void onBeat(uint32_t n, uint32_t period) {
+  glance((n % 2) ? 0.7f : -0.7f, -0.1f, period);  // sway left / right
+  react(faceWith(HAPPY), period + 200);
+  if (n % 4 == 0 && !hopRestoreAt) {  // a little hop on the first beat of the bar
+    BusLock lock;
+    hopRestoreY = eyes.eyeLyNext;
+    eyes.eyeLyNext = 0;
+    hopRestoreAt = millis() + 120;
+  }
+  if (n % 8 == 0) showOverlay(OV_NOTES, period * 4);
+#if SING_ALONG
+  // Hum along: 2 bars singing, 2 bars listening. Root, fifth, third, fifth of the current
+  // chord, up in the buzzer's sweet spot.
+  int bar = (n / 4) % 4, beat = n % 4;
+  if (bar < 2 && ears.st.chord >= 0 && chattiness >= 2 && !muted) {
+    int root = ears.st.chord;
+    int pc = beat == 0 ? root : beat == 2 ? root + (ears.st.chordMinor ? 3 : 4) : root + 7;
+    int midi = SING_BASE_MIDI + ((pc - SING_BASE_MIDI) % 12 + 12) % 12;
+    sayNote(midi, min<uint32_t>(period * 55 / 100, 260), 2);
+  }
+#endif
+}
+
+void musicStep() {
+#if ENABLE_EARS
+  static const char *NOTE_NAMES[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  uint32_t now = millis();
+  bool on = micOk && ears.st.music && activity == ACT_AWAKE && !calStage && !repeatBusy();
+  if (on && !dancing) {
+    dancing = true;
+    interact();
+    react(faceWith(HAPPY), 1500);
+    laughEyes();
+    showOverlay(OV_NOTES, 2500);
+    Serial.printf("[pet] music! %.0f BPM, key %s %s\n", ears.st.bpm, NOTE_NAMES[max<int>(0, ears.st.key)],
+                  ears.st.keyMinor ? "minor" : "major");
+  } else if (!on && dancing) {
+    dancing = false;
+    if (activity == ACT_AWAKE) { react(faceWith(HAPPY), 1500); say(SND_GIGGLE, 2); }
+    Serial.println(F("[pet] music stopped"));
+    return;
+  }
+  if (!dancing) return;
+  lastInteraction = now;  // music is company
+  uint32_t period = ears.st.beatMs, last = ears.st.lastBeat;
+  if (period < 300 || period > 1100 || (int32_t)(now - last) < 0) return;
+  uint32_t beatTime = last + (now - last) / period * period;
+  static uint32_t prevBeat = 0, beatN = 0;
+  if (now - beatTime < 80 && beatTime - prevBeat > period / 2) {
+    prevBeat = beatTime;
+    onBeat(++beatN, period);
+  }
+#endif
+}
+
+#if REPEAT_AFTER_ME
+float rpFrames[420];  // one pitch (midi, 0 = none) per 20 ms brain tick
+uint16_t rpN = 0;
+uint32_t rpStart = 0, rpLastPitch = 0, rpSteadySince = 0, rpPlayUntil = 0;
+float rpSteadyMidi = 0;
+
+void repeatPlayBack() {
+  while (rpN && rpFrames[rpN - 1] == 0) rpN--;  // trailing silence
+  // median pitch -> octave shift into the buzzer's sweet spot
+  float sorted[420];
+  int np = 0;
+  for (int i = 0; i < rpN; i++) if (rpFrames[i] > 0) sorted[np++] = rpFrames[i];
+  if (np < 10) { rpState = RP_IDLE; return; }
+  std::sort(sorted, sorted + np);
+  float med = sorted[np / 2];
+  int shift = 12 * (int)roundf((SING_BASE_MIDI + 4 - med) / 12.0f);
+  // frames -> notes: a note continues while the pitch stays within ~0.8 semitone
+  int notes = 0;
+  uint32_t total = 0;
+  int i = 0;
+  while (i < rpN && notes < 60) {
+    int j = i;
+    float sum = 0;
+    if (rpFrames[i] == 0) {
+      while (j < rpN && rpFrames[j] == 0) j++;
+      if (j - i >= 3) { sayNote(0, (j - i) * 20, 1); total += (j - i) * 20; notes++; }
+    } else {
+      float ref = rpFrames[i];
+      while (j < rpN && rpFrames[j] > 0 && fabsf(rpFrames[j] - ref) < 0.8f) { sum += rpFrames[j]; j++; }
+      int len = j - i;
+      if (len >= 3) {
+        int midi = (int)roundf(sum / len) + shift;
+        uint32_t ms = len * 20;
+        sayNote(midi, ms > 80 ? ms - 60 : 30, 1);  // the sound task adds ~60 ms per note
+        total += ms;
+        notes++;
+      }
+    }
+    i = j;
+  }
+  rpState = RP_PLAY;
+  rpPlayUntil = millis() + total + 600;
+  react(faceWith(HAPPY), total + 500);
+  showOverlay(OV_NOTES, total + 500);
+  Serial.printf("[pet] my turn! %d notes, %+d semitones\n", notes, shift);
+}
+#endif
+
+void repeatStep() {
+#if REPEAT_AFTER_ME && ENABLE_EARS
+  uint32_t now = millis();
+  bool fresh = micOk && ears.st.pitch && now - ears.st.pitchMs < 60 && !soundPlaying;
+  float m = ears.st.pitchMidi;
+  switch (rpState) {
+    case RP_IDLE:
+      if (activity != ACT_AWAKE || dancing || scratching || calStage || hiddenOrBusy()) { rpSteadySince = 0; return; }
+      if (fresh) {
+        if (!rpSteadySince || fabsf(m - rpSteadyMidi) > 0.7f) { rpSteadySince = now; rpSteadyMidi = m; }
+        else if (now - rpSteadySince >= REPEAT_START_MS) {  // a steady note: someone whistles / hums at it
+          rpState = RP_LISTEN;
+          rpStart = rpSteadySince;
+          rpLastPitch = now;
+          rpN = 0;
+          for (uint32_t t = rpSteadySince; t < now && rpN < 420; t += 20) rpFrames[rpN++] = rpSteadyMidi;
+          interact();
+          react(faceWith(DEFAULT), REPEAT_MAX_MS);
+          showOverlay(OV_QUESTION, 0);
+          Serial.printf("[pet] listening (%s)...\n", ears.st.pitchKind == 1 ? "whistle" : "hum");
+        }
+      } else if (now - ears.st.pitchMs > 150) {
+        rpSteadySince = 0;
+      }
+      break;
+    case RP_LISTEN:
+      if (rpN < 420) rpFrames[rpN++] = fresh ? m : 0;
+      if (fresh) rpLastPitch = now;
+      glance(0, -0.5f, 100);  // looks up at you, all ears
+      if (now - rpLastPitch > REPEAT_END_MS || now - rpStart > REPEAT_MAX_MS) {
+        clearOverlay(OV_QUESTION);
+        repeatPlayBack();
+      }
+      break;
+    case RP_PLAY:
+      if (reached(rpPlayUntil)) {
+        rpState = RP_IDLE;
+        rpSteadySince = 0;
+        react(faceWith(HAPPY), 1500);
+        showOverlay(OV_HEARTS, 1500);
+      }
+      break;
+  }
+#endif
+}
+
+bool hiddenOrBusy() { return activity == ACT_HIDING || reactingToSomethingBig(); }
+bool reactingToSomethingBig() { return shaking || falling || handling; }
 
 void onTaps(uint8_t n, float side) {
   if (activity == ACT_HIDING) return;  // face down: see hidingDoubleTapStep()
@@ -2805,6 +2990,7 @@ void runCommand(String cmd) {
     if (t.length()) { overlayLine1 = p1; overlayLine2 = p2; showOverlay(OV_TEXT, 0); }
     else clearOverlay(OV_TEXT);
   }
+  else if (cmd == "ears") { earsStream = !earsStream; }
   else if (cmd == "mic") { micStream = !micStream; if (!micOk) Serial.println(F("microphone not running")); }
   else if (cmd == "calibrate") startCalibration();
   else if (cmd == "calreset") { clearMounting(); Serial.println(F("Calibration cleared - using config.h mapping")); }
@@ -2860,6 +3046,16 @@ void serialStep() {
     } else if (line.length() < 64) {
       line += c;
     }
+  }
+  static uint32_t lastEarsPrint = 0;
+  if (earsStream && since(lastEarsPrint) > 500) {
+    lastEarsPrint = millis();
+    static const char *NN[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    Serial.printf("ears music=%d loud=%4.1fdB beat=%.2f tonal=%.2f bpm=%5.1f key=%s%s chord=%s%s pitch=%s%.1f\n",
+                  ears.st.music, ears.st.loud, ears.st.beatStrength, ears.st.tonality, ears.st.bpm,
+                  ears.st.key >= 0 ? NN[ears.st.key] : "-", ears.st.keyMinor ? "m" : "",
+                  ears.st.chord >= 0 ? NN[ears.st.chord] : "-", ears.st.chordMinor ? "m" : "",
+                  ears.st.pitch ? (ears.st.pitchKind == 1 ? "whistle " : "hum ") : "-", ears.st.pitch ? ears.st.pitchMidi : 0.0f);
   }
   static uint32_t lastMicPrint = 0;
   if (micStream && micOk && since(lastMicPrint) > 200) {
@@ -2925,7 +3121,7 @@ void setup() {
 #endif
 
   busMutex = xSemaphoreCreateRecursiveMutex();
-  soundQueue = xQueueCreate(8, sizeof(int));
+  soundQueue = xQueueCreate(64, sizeof(int));  // room for a whole repeated tune
   // Core 0 exists on every ESP32 (the C3 is single-core; dual-core chips run loop() on core 1).
   xTaskCreatePinnedToCore(eyesTask, "eyes", 4096, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(soundTask, "sound", 4096, NULL, 1, NULL, 0);
@@ -2994,6 +3190,8 @@ void loop() {
     activityStep();
     effectsStep();
     scratchStep();
+    musicStep();
+    repeatStep();
     quirkStep();
     baselineFace();
     gazeStep();
