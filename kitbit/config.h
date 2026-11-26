@@ -133,6 +133,7 @@
 #define SCRATCH_JOY_PER_S  4.0f    // happiness per second of head scratches
 #define ENERGY_AWAKE_HOURS 6.0f    // full -> empty while awake
 #define ENERGY_RECHARGE_MIN 45.0f  // empty -> full while asleep
+#define ENERGY_CHARGE_MIN  60.0f   // empty -> full while awake and plugged in (being fed)
 
 // Break buddy: nags you to take a break after continuous desk activity
 #define BREAK_REMINDER_MIN 50      // 0 disables

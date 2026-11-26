@@ -1415,6 +1415,7 @@ void petMe() {  // double tap or touch pad
   laughEyes();
   say(random(2) ? S_CUDDLY : SND_PURR);
   addHappiness(PET_JOY);
+  addEnergy(3);  // a cuddle perks it up a bit
 }
 
 void boop(float side) {
@@ -2005,6 +2006,7 @@ void needsTick() {  // once per second
   if (resting) addEnergy(100.0f / (ENERGY_RECHARGE_MIN * 60.0f));
   else if (!eating) addEnergy(-100.0f / (ENERGY_AWAKE_HOURS * 3600.0f));
   if (eating && happiness < 80) addHappiness(1.0f / 60.0f);  // a full tummy is a happy tummy
+  if (eating && !resting) addEnergy(100.0f / (ENERGY_CHARGE_MIN * 60.0f));  // being fed restores energy
 
   if (!resting) {
     bool bored = since(lastInteraction) > minutes(BORED_AFTER_MIN);
@@ -2162,7 +2164,8 @@ void baselineFace() {
     case ACT_AWAKE:
       if (orient == OR_UPSIDE_DOWN) f.mood = batMode ? HAPPY : ANGRY;
       else if (handling) f.mood = happiness > 40 ? HAPPY : DEFAULT;
-      else if (energy < 25 || happiness < 30 || battState == BATT_LOW || battState == BATT_CRITICAL) f.mood = TIRED;
+      // Droopy eyes = sad, or REALLY tired. Normal tiredness shows as yawns / dozing off sooner.
+      else if (energy < 10 || happiness < 30 || battState == BATT_LOW || battState == BATT_CRITICAL) f.mood = TIRED;
       else if (happiness > 85) f.mood = HAPPY;
       if (breakDue || battState == BATT_CRITICAL) f.sweat = true;
       break;
